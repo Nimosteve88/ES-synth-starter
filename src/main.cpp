@@ -12,7 +12,7 @@
 //#define TEST_SCANKEYS
 
 enum ModuleRole { SENDER, RECEIVER };
-ModuleRole moduleRole = RECEIVER;   // Change to RECEIVER for receiver modules
+ModuleRole moduleRole = SENDER;   // Change to RECEIVER for receiver modules
 
 // Global variable for choosing the octave number for this module.
 uint8_t moduleOctave = 4;         // Default octave number (can be changed at runtime)
@@ -115,6 +115,7 @@ struct {
     int knob3Rotation;
     Knob knob3;
     Knob knob2;
+    Knob knob1;
     uint8_t RX_Message[8];
     } sysState;
 
@@ -273,9 +274,9 @@ void scanKeysTask(void * pvParameters) {
     while (1) {
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
 
-        // 1) Scan the full 4x4 matrix into localInputs (16 keys)
+        // 1) Scan the full 5x4 matrix into localInputs (16 keys)
         std::bitset<32> localInputs;
-        for (uint8_t row = 0; row < 4; row++) {
+        for (uint8_t row = 0; row < 5; row++) {
             setRow(row);
             delayMicroseconds(2);
             std::bitset<4> rowInputs = readCols();
@@ -317,54 +318,25 @@ void scanKeysTask(void * pvParameters) {
         }
         
 
-        // 4) Process configuration keys (keys 12-15, row 3) for changing moduleRole and moduleOctave.
-        // for (uint8_t key = 12; key < 16; key++) {
-        //     bool currentState = localInputs[key];
-        //     bool previousState = prevKeys[key];
-        //     // Trigger on key press (rising edge)
-        //     if (currentState != previousState && currentState == true) {
-        //         switch(key) {
-        //             case 12:
-        //                 if (moduleOctave > 0) {
-        //                     moduleOctave--;
-        //                     //Serial.print("Octave decreased to ");
-        //                     //Serial.println(moduleOctave);
-        //                 }
-        //                 Serial.println("CASE 12");
-        //                 break;
-        //             case 13: // Increase octave (max value, say, 8)
-        //                 Serial.println("CASE 13");
-        //                 break;
-        //             case 14: // Decrease octave (min value, say, 0)
-        //                 if (moduleOctave < 8) {
-        //                     moduleOctave++;
-        //                     // Serial.print("Octave increased to ");
-        //                     // Serial.println(moduleOctave);
-        //                 }
-        //                 Serial.println("CASE 14");
-        //                 break;
-        //             case 15: // Reserved for an optional function (e.g., reset settings)
-        //                 moduleRole = (moduleRole == SENDER) ? RECEIVER : SENDER;
-        //                 Serial.print("Module role toggled. New role: ");
-        //                 Serial.println(moduleRole == SENDER ? "SENDER" : "RECEIVER");
-        //                 Serial.println("CASE 15");
-        //                 break;
-        //         }
-        //     }
-        //     prevKeys[key] = currentState;
-        // }
-
-        // 5) Decode knob 3 (remains unchanged)
+        // 4) Decode knob 3 (remains unchanged)
         uint8_t knob3A = localInputs[3 * 4 + 0];
         uint8_t knob3B = localInputs[3 * 4 + 1];
         uint8_t knob3Curr = (knob3B << 1) | knob3A;  // Quadrature state {B, A}
         sysState.knob3.update(knob3Curr);
 
-        // 6) Decode knob 2 (remains unchanged)
+        // 5) Decode knob 2 (remains unchanged)
         uint8_t knob2A = localInputs[3 * 4 + 2];
         uint8_t knob2B = localInputs[3 * 4 + 3];
         uint8_t knob2Curr = (knob2B << 1) | knob2A;  // Quadrature state {B, A}
         sysState.knob2.update(knob2Curr);
+
+        // 6) Decode knob 1 (remains unchanged)
+        uint8_t knob1A = localInputs[4 * 4 + 0];
+        uint8_t knob1B = localInputs[4 * 4 + 1];
+        uint8_t knob1Curr = (knob1B << 1) | knob1A;  // Quadrature state {B, A}
+        sysState.knob1.update(knob1Curr);
+        moduleRole = (sysState.knob1.getRotation() % 2) ? SENDER : RECEIVER;
+
     }
 #endif
 }
