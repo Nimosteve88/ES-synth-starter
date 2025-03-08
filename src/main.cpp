@@ -12,7 +12,7 @@
 //#define TEST_SCANKEYS
 
 enum ModuleRole { SENDER, RECEIVER };
-ModuleRole moduleRole = SENDER;   // Change to RECEIVER for receiver modules
+ModuleRole moduleRole = RECEIVER;   // Change to RECEIVER for receiver modules
 
 // Global variable for choosing the octave number for this module.
 uint8_t moduleOctave = 4;         // Default octave number (can be changed at runtime)
@@ -114,6 +114,7 @@ struct {
     SemaphoreHandle_t mutex;  
     int knob3Rotation;
     Knob knob3;
+    Knob knob2;
     uint8_t RX_Message[8];
     } sysState;
 
@@ -317,44 +318,53 @@ void scanKeysTask(void * pvParameters) {
         
 
         // 4) Process configuration keys (keys 12-15, row 3) for changing moduleRole and moduleOctave.
-        for (uint8_t key = 12; key < 16; key++) {
-            bool currentState = localInputs[key];
-            bool previousState = prevKeys[key];
-            // Trigger on key press (rising edge)
-            if (currentState != previousState && currentState == true) {
-                switch(key) {
-                    case 12:
-                        if (moduleOctave > 0) {
-                            moduleOctave--;
-                            Serial.print("Octave decreased to ");
-                            Serial.println(moduleOctave);
-                        }
-                        break;
-                    case 13: // Increase octave (max value, say, 8)
-                        if (moduleOctave < 8) {
-                            moduleOctave++;
-                            Serial.print("Octave increased to ");
-                            Serial.println(moduleOctave);
-                        }
-                        break;
-                    case 14: // Decrease octave (min value, say, 0)
-
-                        break;
-                    case 15: // Reserved for an optional function (e.g., reset settings)
-                        moduleRole = (moduleRole == SENDER) ? RECEIVER : SENDER;
-                        Serial.print("Module role toggled. New role: ");
-                        Serial.println(moduleRole == SENDER ? "SENDER" : "RECEIVER");
-                        break;
-                }
-            }
-            prevKeys[key] = currentState;
-        }
+        // for (uint8_t key = 12; key < 16; key++) {
+        //     bool currentState = localInputs[key];
+        //     bool previousState = prevKeys[key];
+        //     // Trigger on key press (rising edge)
+        //     if (currentState != previousState && currentState == true) {
+        //         switch(key) {
+        //             case 12:
+        //                 if (moduleOctave > 0) {
+        //                     moduleOctave--;
+        //                     //Serial.print("Octave decreased to ");
+        //                     //Serial.println(moduleOctave);
+        //                 }
+        //                 Serial.println("CASE 12");
+        //                 break;
+        //             case 13: // Increase octave (max value, say, 8)
+        //                 Serial.println("CASE 13");
+        //                 break;
+        //             case 14: // Decrease octave (min value, say, 0)
+        //                 if (moduleOctave < 8) {
+        //                     moduleOctave++;
+        //                     // Serial.print("Octave increased to ");
+        //                     // Serial.println(moduleOctave);
+        //                 }
+        //                 Serial.println("CASE 14");
+        //                 break;
+        //             case 15: // Reserved for an optional function (e.g., reset settings)
+        //                 moduleRole = (moduleRole == SENDER) ? RECEIVER : SENDER;
+        //                 Serial.print("Module role toggled. New role: ");
+        //                 Serial.println(moduleRole == SENDER ? "SENDER" : "RECEIVER");
+        //                 Serial.println("CASE 15");
+        //                 break;
+        //         }
+        //     }
+        //     prevKeys[key] = currentState;
+        // }
 
         // 5) Decode knob 3 (remains unchanged)
         uint8_t knob3A = localInputs[3 * 4 + 0];
         uint8_t knob3B = localInputs[3 * 4 + 1];
-        uint8_t knob3Curr = (knob3B << 1) | knob3A;
+        uint8_t knob3Curr = (knob3B << 1) | knob3A;  // Quadrature state {B, A}
         sysState.knob3.update(knob3Curr);
+
+        // 6) Decode knob 2 (remains unchanged)
+        uint8_t knob2A = localInputs[3 * 4 + 2];
+        uint8_t knob2B = localInputs[3 * 4 + 3];
+        uint8_t knob2Curr = (knob2B << 1) | knob2A;  // Quadrature state {B, A}
+        sysState.knob2.update(knob2Curr);
     }
 #endif
 }
@@ -387,6 +397,10 @@ void displayUpdateTask(void * pvParameters) {
         u8g2.print("Knob: ");
         // Read the knob value using the class method
         u8g2.print(rotationCopy);
+
+        u8g2.setCursor(66, 20);
+        u8g2.print("Octave: ");
+        u8g2.print(moduleOctave);
 
 
         // Now display the last received CAN message.
@@ -462,17 +476,30 @@ void sampleISR() {
         // Do not generate audio in sender mode.
         return;
     }
-    uint32_t step = currentStepSize;
-    phaseAcc += step;
+    
+    // Calculate effective step size based on moduleOctave.
+    // (Assuming 4 is the base octave.)
+    uint32_t effectiveStep = currentStepSize;
+    if (moduleOctave > 4) {
+        effectiveStep = effectiveStep << (moduleOctave - 4);
+    } else if (moduleOctave < 4) {
+        effectiveStep = effectiveStep >> (4 - moduleOctave);
+    }
+    
+    phaseAcc += effectiveStep;
     int32_t Vout = (phaseAcc >> 24) - 128;
 
-    
-    // (Optional: Clamp again, just in case)
+    // Optionally update moduleOctave based on knob2 (overriding moduleOctave if desired)
+    int knobOctave = sysState.knob2.getRotation();
+    if (knobOctave < 0) knobOctave = 0;
+    if (knobOctave > 8) knobOctave = 8;
+    // Decide whether to use knobOctave or moduleOctave for the frequency scaling:
+    moduleOctave = knobOctave;
+
+    // Read the volume (from knob3) and apply log taper volume control:
     int volume = sysState.knob3.getRotation();
     if (volume < 0) volume = 0;
     if (volume > 8) volume = 8;
-
-    // Apply the log taper volume control:
     Vout = Vout >> (8 - volume);
 
     analogWrite(OUTR_PIN, Vout + 128);
