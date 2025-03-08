@@ -274,9 +274,9 @@ void scanKeysTask(void * pvParameters) {
     while (1) {
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
 
-        // 1) Scan the full 5x4 matrix into localInputs (16 keys)
+        // 1) Scan the full 8x4 matrix into localInputs (16 keys)
         std::bitset<32> localInputs;
-        for (uint8_t row = 0; row < 5; row++) {
+        for (uint8_t row = 0; row < 8; row++) {
             setRow(row);
             delayMicroseconds(2);
             std::bitset<4> rowInputs = readCols();
@@ -337,6 +337,18 @@ void scanKeysTask(void * pvParameters) {
         sysState.knob1.update(knob1Curr);
         moduleRole = (sysState.knob1.getRotation() % 2) ? SENDER : RECEIVER;
 
+        if (!localInputs[4*5 + 0]){
+            Serial.println("Knob 2S pressed");
+        } else if (!localInputs[4*5 + 1]){
+            Serial.println("Knob 3S pressed");
+        } else if (!localInputs[4*5 + 2]){
+            Serial.println("Joystick S pressed");
+        } else if (!localInputs[4*6 + 0]){
+            Serial.println("Knob 0S pressed");
+        } else if (!localInputs[4*6 + 1]){
+            Serial.println("Knob 1S pressed");
+        }
+
     }
 #endif
 }
@@ -358,6 +370,15 @@ void displayUpdateTask(void * pvParameters) {
         u8g2.clearBuffer();
         u8g2.setFont(u8g2_font_ncenB08_tr);
         u8g2.drawStr(2,10,moduleRole == SENDER ? "SENDER" : "RECEIVER");
+
+        // Display current JOYX and JOYY values in the form (12,34)
+        u8g2.setCursor(75, 10);
+        u8g2.print("(");
+        u8g2.print(analogRead(JOYX_PIN));
+        u8g2.print(",");
+        u8g2.print(analogRead(JOYY_PIN));
+        u8g2.print(")");
+    
 
         // Display key matrix state
         u8g2.setCursor(2,20);
