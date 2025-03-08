@@ -2,15 +2,121 @@
 #include <U8g2lib.h>
 #include <bitset>
 #include <cmath>
-#include <HardwareTimer.h>
+#include <ES_CAN.h>
 #include <STM32FreeRTOS.h>   // Include FreeRTOS for STM32
+
+
+// Uncomment the following lines for test builds:
+//#define DISABLE_THREADS
+//#define DISABLE_ISRS
+//#define TEST_SCANKEYS
+
+enum ModuleRole { SENDER, RECEIVER };
+ModuleRole moduleRole = SENDER;   // Change to RECEIVER for receiver modules
+
+// Global variable for choosing the octave number for this module.
+uint8_t moduleOctave = 4;         // Default octave number (can be changed at runtime)
+
+
+// ------------------------- Knob Class -------------------------------------- //
+
+class Knob {
+    public:
+        // Constructor: initialise limits, starting value, and internal state.
+        Knob(int lower = 0, int upper = 8)
+            : lowerLimit(lower), upperLimit(upper), rotation(lower), knobPrev(0), lastLegalDelta(0)
+        {
+        }
+    
+        // Update the knob's rotation value using the new quadrature state (2-bit value)
+        void update(uint8_t quadratureState) {
+            int delta = 0;
+            uint8_t diff = knobPrev ^ quadratureState;
+            if (diff == 0) {
+                // No change in the state
+                delta = 0;
+            }
+            else if (diff == 0b11) {
+                // Both bits changed: an impossible transition.
+                // Assume the same direction as the last legal transition.
+                delta = (lastLegalDelta != 0) ? lastLegalDelta : 0;
+            }
+            else {
+                // Legal transition (only one bit changed).
+                uint8_t transition = (knobPrev << 2) | quadratureState;
+                switch (transition) {
+                    case 0b0001: // 00 -> 01: Clockwise => +1
+                        delta = +1;
+                        lastLegalDelta = +1;
+                        break;
+                    case 0b0100: // 01 -> 00: Anticlockwise => -1
+                        delta = -1;
+                        lastLegalDelta = -1;
+                        break;
+                    case 0b1011: // 10 -> 11: Anticlockwise => -1
+                        delta = -1;
+                        lastLegalDelta = -1;
+                        break;
+                    case 0b1110: // 11 -> 10: Clockwise => +1
+                        delta = +1;
+                        lastLegalDelta = +1;
+                        break;
+                    default:
+                        // For intermediate or inconclusive transitions, make no change.
+                        delta = 0;
+                        break;
+                }
+            }
+            // Save the current state for the next update.
+            knobPrev = quadratureState;
+    
+            // Read the current rotation value atomically.
+            int current = __atomic_load_n(&rotation, __ATOMIC_RELAXED);
+            int newVal = current + delta;
+            // Clamp to the permitted limits.
+            if (newVal < lowerLimit) newVal = lowerLimit;
+            if (newVal > upperLimit) newVal = upperLimit;
+            // Atomically store the new rotation value.
+            __atomic_store_n(&rotation, newVal, __ATOMIC_RELAXED);
+        }
+    
+        // Get the current knob rotation (thread-safe atomic load)
+        int getRotation() const {
+            return __atomic_load_n(&rotation, __ATOMIC_RELAXED);
+        }
+    
+        // Set new lower and upper limits, and adjust the current value if needed.
+        void setLimits(int lower, int upper) {
+            lowerLimit = lower;
+            upperLimit = upper;
+            int current = getRotation();
+            if (current < lowerLimit) current = lowerLimit;
+            if (current > upperLimit) current = upperLimit;
+            __atomic_store_n(&rotation, current, __ATOMIC_RELAXED);
+        }
+    
+    private:
+        int rotation;      // Current rotation value (atomically accessed)
+        int lowerLimit;    // Minimum allowed value
+        int upperLimit;    // Maximum allowed value
+    
+        // Internal state for quadrature decoding:
+        uint8_t knobPrev;      // Previous 2-bit state {B, A}
+        int lastLegalDelta;    // Last legal delta (+1 or -1)
+    };
+
 
 // ------------------------ GLOBAL STRUCT & GLOBALS ------------------------ //
 
 // Shared system state (used by more than one thread)
 struct {
-    std::bitset<32> inputs;  
-} sysState;
+    std::bitset<32> inputs;
+    SemaphoreHandle_t mutex;  
+    int knob3Rotation;
+    Knob knob3;
+    uint8_t RX_Message[8];
+    } sysState;
+
 
 // Global variable for the current note step size (accessed by ISR)
 uint32_t currentStepSize = 0;
@@ -19,20 +125,50 @@ uint32_t currentStepSize = 0;
 static uint32_t phaseAcc = 0;
 HardwareTimer sampleTimer(TIM1);
 
+volatile uint8_t TX_Message[8] = {0}; 
+
+QueueHandle_t msgInQ;
+#ifdef TEST_SCANKEYS
+  // Increase the queue size in test mode to avoid blocking.
+  QueueHandle_t msgOutQ;  // We’ll create a larger queue below.
+#else
+  QueueHandle_t msgOutQ;
+#endif
+
+SemaphoreHandle_t CAN_TX_Semaphore;
+
 // ------------------------- CONSTANTS & PIN DEFINITIONS ------------------------ //
 
 constexpr uint32_t SAMPLE_RATE = 22050; // Audio sample rate (Hz)
 
-// Pin Definitions
-const int RA0_PIN  = D3;
-const int RA1_PIN  = D6;
-const int RA2_PIN  = D12;
-const int REN_PIN  = A5;
-const int C0_PIN   = A2;
-const int C1_PIN   = D9;
-const int C2_PIN   = A6;
-const int C3_PIN   = D1;
-const int OUTR_PIN = A3;
+//Pin definitions
+  //Row select and enable
+  const int RA0_PIN = D3;
+  const int RA1_PIN = D6;
+  const int RA2_PIN = D12;
+  const int REN_PIN = A5;
+
+  //Matrix input and output
+  const int C0_PIN = A2;
+  const int C1_PIN = D9;
+  const int C2_PIN = A6;
+  const int C3_PIN = D1;
+  const int OUT_PIN = D11;
+
+  //Audio analogue out
+  const int OUTL_PIN = A4;
+  const int OUTR_PIN = A3;
+
+  //Joystick analogue in
+  const int JOYY_PIN = A0;
+  const int JOYX_PIN = A1;
+
+  //Output multiplexer bits
+  const int DEN_BIT = 3;
+  const int DRST_BIT = 4;
+  const int HKOW_BIT = 5;
+  const int HKOE_BIT = 6;
+
 
 // LED indicator (ensure LED_BUILTIN is defined for your board)
 #ifndef LED_BUILTIN
@@ -82,29 +218,61 @@ void setRow(uint8_t row) {
     digitalWrite(REN_PIN, HIGH);
 }
 
+void setOutMuxBit(const uint8_t bitIdx, const bool value) {
+    digitalWrite(REN_PIN,LOW);
+    digitalWrite(RA0_PIN, bitIdx & 0x01);
+    digitalWrite(RA1_PIN, bitIdx & 0x02);
+    digitalWrite(RA2_PIN, bitIdx & 0x04);
+    digitalWrite(OUT_PIN,value);
+    digitalWrite(REN_PIN,HIGH);
+    delayMicroseconds(2);
+    digitalWrite(REN_PIN,LOW);
+}
+
 // Read the column values from the 4 inputs (assuming pull-up + key press pulls LOW)
 std::bitset<4> readCols() {
     std::bitset<4> cols;
-    cols[0] = !digitalRead(C0_PIN);
-    cols[1] = !digitalRead(C1_PIN);
-    cols[2] = !digitalRead(C2_PIN);
-    cols[3] = !digitalRead(C3_PIN);
+    cols[0] = digitalRead(C0_PIN);
+    cols[1] = digitalRead(C1_PIN);
+    cols[2] = digitalRead(C2_PIN);
+    cols[3] = digitalRead(C3_PIN);
     return cols;
 }
 
+
+    
+
+
+
 // ----------------------- FREE RTOS TASKS ----------------------------------- //
 
-// Task to scan the key matrix at a 50ms interval (priority 2)
+// In your global variables, change the previous state bitset to track 16 keys:
+static std::bitset<16> prevKeys;  // Now tracks keys 0-15
+
+// Task to scan the key matrix at a 20-50ms interval (priority 2)
 void scanKeysTask(void * pvParameters) {
-    const TickType_t xFrequency = 50 / portTICK_PERIOD_MS;
+#ifdef TEST_SCANKEYS
+    // In test mode, we simulate a worst-case scenario:
+    // For every call, generate a key press message for each of the 12 keys.
+    for (uint8_t key = 0; key < 12; key++) {
+        uint8_t TX_Message[8] = {0};
+        TX_Message[0] = 'P';
+        TX_Message[1] = 4;
+        TX_Message[2] = key;
+        // Send only if in SENDER mode.
+        if (moduleRole == SENDER) {
+            xQueueSend(msgOutQ, TX_Message, 0);
+        }
+    }
+#else
+    const TickType_t xFrequency = 20 / portTICK_PERIOD_MS;
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    (void) pvParameters;  // Unused parameter
+
 
     while (1) {
-        // Block until 50ms have passed since last execution
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
 
-        // Local copy for key scan result
+        // 1) Scan the full 4x4 matrix into localInputs (16 keys)
         std::bitset<32> localInputs;
         for (uint8_t row = 0; row < 4; row++) {
             setRow(row);
@@ -114,62 +282,221 @@ void scanKeysTask(void * pvParameters) {
                 localInputs[row * 4 + col] = rowInputs[col];
             }
         }
-        sysState.inputs = localInputs;
 
-        // Determine which note (if any) is pressed
+        // 2) Update shared key state (if needed)
+        xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+        sysState.inputs = localInputs;
+        xSemaphoreGive(sysState.mutex);
+
+        // 3) Process note keys (first 12 keys, rows 0-2) as before
         uint32_t localStepSize = 0;
         for (uint8_t i = 0; i < 12; i++) {
-            if (localInputs[i]) {
+            if (!localInputs[i]) {
                 localStepSize = stepSizes[i];
                 break;
             }
         }
-        // Update currentStepSize (a 32-bit write on a 32-bit MCU is atomic)
         currentStepSize = localStepSize;
+        // Process note press/release events for keys 0-11:
+        uint8_t currentOctave = moduleOctave;
+        for (uint8_t key = 0; key < 12; key++) {
+            bool currentState = !localInputs[key];
+            bool previousState = prevKeys[key];
+            if (currentState != previousState) {
+                // Send messages only in SENDER mode.
+                if (moduleRole == SENDER) {
+                    uint8_t TX_Message[8] = {0};
+                    TX_Message[0] = currentState ? 'P' : 'R';
+                    TX_Message[1] = currentOctave;
+                    TX_Message[2] = key;
+                    xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
+                }
+            }
+            prevKeys[key] = currentState;
+        }
+        
+
+        // 4) Process configuration keys (keys 12-15, row 3) for changing moduleRole and moduleOctave.
+        for (uint8_t key = 12; key < 16; key++) {
+            bool currentState = localInputs[key];
+            bool previousState = prevKeys[key];
+            // Trigger on key press (rising edge)
+            if (currentState != previousState && currentState == true) {
+                switch(key) {
+                    case 12:
+                        if (moduleOctave > 0) {
+                            moduleOctave--;
+                            Serial.print("Octave decreased to ");
+                            Serial.println(moduleOctave);
+                        }
+                        break;
+                    case 13: // Increase octave (max value, say, 8)
+                        if (moduleOctave < 8) {
+                            moduleOctave++;
+                            Serial.print("Octave increased to ");
+                            Serial.println(moduleOctave);
+                        }
+                        break;
+                    case 14: // Decrease octave (min value, say, 0)
+
+                        break;
+                    case 15: // Reserved for an optional function (e.g., reset settings)
+                        moduleRole = (moduleRole == SENDER) ? RECEIVER : SENDER;
+                        Serial.print("Module role toggled. New role: ");
+                        Serial.println(moduleRole == SENDER ? "SENDER" : "RECEIVER");
+                        break;
+                }
+            }
+            prevKeys[key] = currentState;
+        }
+
+        // 5) Decode knob 3 (remains unchanged)
+        uint8_t knob3A = localInputs[3 * 4 + 0];
+        uint8_t knob3B = localInputs[3 * 4 + 1];
+        uint8_t knob3Curr = (knob3B << 1) | knob3A;
+        sysState.knob3.update(knob3Curr);
     }
+#endif
 }
 
-// Task to update the display and toggle the LED every 100ms (priority 1)
+// Task to update the display and poll for received CAN messages (priority 1)
 void displayUpdateTask(void * pvParameters) {
     const TickType_t xFrequency = 100 / portTICK_PERIOD_MS;
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    (void) pvParameters;  // Unused parameter
 
     while (1) {
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
-
-        // Toggle the onboard LED as a real-time indicator
         digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
 
-        // Update the display with the currently pressed note (if any)
+        // Read sysState.knob3Rotation under the mutex
+        xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+        int rotationCopy = sysState.knob3.getRotation();
+        xSemaphoreGive(sysState.mutex);
+
         u8g2.clearBuffer();
         u8g2.setFont(u8g2_font_ncenB08_tr);
-        for (int i = 0; i < 12; i++) {
-            if (sysState.inputs[i]) {
-                u8g2.drawStr(0, 12, noteNames[i]);
-                break;
-            }
-        }
+        u8g2.drawStr(2,10,moduleRole == SENDER ? "SENDER" : "RECEIVER");
+
+        // Display key matrix state
+        u8g2.setCursor(2,20);
+        xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+        u8g2.print(sysState.inputs.to_ulong(), HEX);
+        xSemaphoreGive(sysState.mutex);
+
+        u8g2.setCursor(2, 30);
+        u8g2.print("Knob: ");
+        // Read the knob value using the class method
+        u8g2.print(rotationCopy);
+
+
+        // Now display the last received CAN message.
+        xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+        u8g2.setCursor(66,30);
+        // Serial.print("RX: ");
+        // for (uint8_t i = 0; i < 8; i++) {
+        //     Serial.print(sysState.RX_Message[i], HEX);
+        //     Serial.print(" ");
+        // }
+        Serial.println();
+        u8g2.print(sysState.RX_Message[0] == 'P' ? "P" : "R");
+        u8g2.print(sysState.RX_Message[1]);
+        u8g2.print(sysState.RX_Message[2]);
+        xSemaphoreGive(sysState.mutex);
+
         u8g2.sendBuffer();
+        digitalToggle(LED_BUILTIN);
     }
 }
+
+// -------------------------- DECODE TASK  ----------------------------------- //
+
+void decodeTask(void * pvParameters) {
+    uint8_t localMsg[8];
+    for (;;) {
+        // Block until a message is available:
+        if (xQueueReceive(msgInQ, localMsg, portMAX_DELAY) == pdPASS) {
+            if (localMsg[0] == 'R') {  // Release message: set step size to 0.
+                __atomic_store_n(&currentStepSize, (uint32_t)0, __ATOMIC_RELAXED);
+            }
+            else if (localMsg[0] == 'P') {  // Press message: convert note and octave.
+                uint8_t octave = localMsg[1];
+                uint8_t note = localMsg[2];
+                if (note < 12) {
+                    uint32_t step = stepSizes[note];
+                    if (octave > 4) {
+                        step = step << (octave - 4);
+                    } else if (octave < 4) {
+                        step = step >> (4 - octave);
+                    }
+                    __atomic_store_n(&currentStepSize, step, __ATOMIC_RELAXED);
+                }
+            }
+            // Update the global RX_Message
+            xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+            memcpy(sysState.RX_Message, localMsg, sizeof(sysState.RX_Message));
+            xSemaphoreGive(sysState.mutex);
+        }
+    }
+}
+
+
+
+void CAN_TX_Task (void * pvParameters) {
+	// If not SENDER, suspend this task.
+    if (moduleRole != SENDER) {
+        while (1) { vTaskDelay(portMAX_DELAY); }
+    }
+    uint8_t msgOut[8];
+    while (1) {
+        xQueueReceive(msgOutQ, msgOut, portMAX_DELAY);
+        xSemaphoreTake(CAN_TX_Semaphore, portMAX_DELAY);
+        CAN_TX(0x123, msgOut);
+    }
+}
+
 
 // ------------------------- TIMER ISR FOR AUDIO ----------------------------- //
 
 void sampleISR() {
-    // Optionally, you could do an atomic load if needed:
-    // uint32_t step = __atomic_load_n(&currentStepSize, __ATOMIC_RELAXED);
+    if (moduleRole == SENDER) {
+        // Do not generate audio in sender mode.
+        return;
+    }
     uint32_t step = currentStepSize;
     phaseAcc += step;
-    // Generate a simple 8-bit sawtooth wave:
     int32_t Vout = (phaseAcc >> 24) - 128;
+
+    
+    // (Optional: Clamp again, just in case)
+    int volume = sysState.knob3.getRotation();
+    if (volume < 0) volume = 0;
+    if (volume > 8) volume = 8;
+
+    // Apply the log taper volume control:
+    Vout = Vout >> (8 - volume);
+
     analogWrite(OUTR_PIN, Vout + 128);
 }
+
+void CAN_RX_ISR (void) {
+	uint8_t RX_Message_ISR[8];
+	uint32_t ID;
+	CAN_RX(ID, RX_Message_ISR);
+	xQueueSendFromISR(msgInQ, RX_Message_ISR, NULL); // Send the received message to the queue
+}
+
+void CAN_TX_ISR (void) {
+	xSemaphoreGiveFromISR(CAN_TX_Semaphore, NULL);
+}
+
 
 // ------------------------- SETUP & LOOP ------------------------------------ //
 
 void setup() {
     Serial.begin(9600);
+#ifdef TEST_SCANKEYS
+    delay(3000);
+#endif
     Serial.println("Synth Initialized");
 
     // Configure pins
@@ -177,47 +504,93 @@ void setup() {
     pinMode(RA1_PIN, OUTPUT);
     pinMode(RA2_PIN, OUTPUT);
     pinMode(REN_PIN, OUTPUT);
+    pinMode(OUT_PIN, OUTPUT);
+    pinMode(OUTL_PIN, OUTPUT);
     pinMode(OUTR_PIN, OUTPUT);
-    pinMode(C0_PIN, INPUT_PULLUP);
-    pinMode(C1_PIN, INPUT_PULLUP);
-    pinMode(C2_PIN, INPUT_PULLUP);
-    pinMode(C3_PIN, INPUT_PULLUP);
     pinMode(LED_BUILTIN, OUTPUT);
 
-    // Initialize display
-    u8g2.begin();
+    pinMode(C0_PIN, INPUT);
+    pinMode(C1_PIN, INPUT);
+    pinMode(C2_PIN, INPUT);
+    pinMode(C3_PIN, INPUT);
+    pinMode(JOYX_PIN, INPUT);
+    pinMode(JOYY_PIN, INPUT);
 
+    //Initialise display
+    setOutMuxBit(DRST_BIT, LOW);  //Assert display logic reset
+    delayMicroseconds(2);
+    setOutMuxBit(DRST_BIT, HIGH);  //Release display logic reset
+    u8g2.begin();
+    setOutMuxBit(DEN_BIT, HIGH);  //Enable display power supply
+    
+    
     // Initialize audio sample timer
     sampleTimer.setOverflow(SAMPLE_RATE, HERTZ_FORMAT);
+//#ifndef DISABLE_ISRS
     sampleTimer.attachInterrupt(sampleISR);
+//#endif
     sampleTimer.resume();
+    
+    CAN_Init(true);
+    setCANFilter(0x123, 0x7ff); 
+//#ifndef DISABLE_ISRS
+    CAN_RegisterRX_ISR(CAN_RX_ISR);
+    CAN_RegisterTX_ISR(CAN_TX_ISR);
+//#endif
+    CAN_Start();
+    
+    sysState.mutex = xSemaphoreCreateMutex();
 
-    // Create the key scanning task (priority 2, 64 words stack)
+    msgInQ = xQueueCreate(36, 8);
+#ifdef TEST_SCANKEYS
+    msgOutQ = xQueueCreate(384, 8);  // Larger queue for test iterations.
+#else
+    msgOutQ = xQueueCreate(36, 8);
+#endif
+    CAN_TX_Semaphore = xSemaphoreCreateCounting(3, 3);
+
+#ifndef DISABLE_THREADS
+    Serial.print("modulerole: ");
+    Serial.println(moduleRole);
     TaskHandle_t scanKeysHandle = NULL;
-    xTaskCreate(
-        scanKeysTask,     // Task function
-        "scanKeys",       // Task name
-        64,               // Stack size in words
-        NULL,             // Parameter (none)
-        2,                // Priority (higher)
-        &scanKeysHandle   // Task handle
-    );
-
-    // Create the display update task (priority 1, 256 words stack)
+    xTaskCreate(scanKeysTask, "scanKeys", 64, NULL, 2, &scanKeysHandle);
+    
     TaskHandle_t displayUpdateHandle = NULL;
-    xTaskCreate(
-        displayUpdateTask,  // Task function
-        "displayUpdate",    // Task name
-        256,                // Stack size in words
-        NULL,               // Parameter (none)
-        1,                  // Priority (lower)
-        &displayUpdateHandle // Task handle
-    );
+    xTaskCreate(displayUpdateTask, "displayUpdate", 256, NULL, 1, &displayUpdateHandle);
+    
+    // Always create decodeTask so that received messages are processed.
+    TaskHandle_t decodeTaskHandle = NULL;
+    xTaskCreate(decodeTask, "decodeTask", 128, NULL, 1, &decodeTaskHandle);
 
-    // Start the FreeRTOS scheduler; this function should never return.
+    if (moduleRole == SENDER) {
+        TaskHandle_t CAN_TX_Handle = NULL;
+        xTaskCreate(CAN_TX_Task, "CAN_TX_Task", 128, NULL, 1, &CAN_TX_Handle);
+    }
+
+#endif
+
+#ifdef TEST_SCANKEYS
+    // In test mode, execute the scanKeysTask 32 times (without starting the scheduler)
+        // Flush the transmit queue before timing.
+    xQueueReset(msgOutQ);
+    uint32_t startTime = micros();
+    for (int iter = 0; iter < 32; iter++) {
+        scanKeysTask(NULL);
+    }
+    uint32_t elapsed = micros() - startTime;
+    Serial.print("32 iterations of scanKeysTask() took: ");
+    Serial.print(elapsed);
+    Serial.println(" microseconds");
+    while(1);
+#endif
+
+#ifndef DISABLE_THREADS
+    // Start the FreeRTOS scheduler; this should never return in normal operation.
     vTaskStartScheduler();
+#endif
 }
 
 void loop() {
-    // Empty. All tasks run under FreeRTOS.
+    // Empty. All tasks run under FreeRTOS.    
+
 }
