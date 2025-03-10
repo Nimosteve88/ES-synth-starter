@@ -17,6 +17,10 @@ ModuleRole moduleRole = SENDER;   // Change to RECEIVER for receiver modules
 // Global variable for choosing the octave number for this module.
 uint8_t moduleOctave = 4;         // Default octave number (can be changed at runtime)
 
+volatile int joyX12Val = 6;  // Default mid value (0 to 12)
+volatile int joyY12Val = 6;  // Default mid value (0 to 12)
+
+
 
 // ------------------------- Knob Class -------------------------------------- //
 
@@ -335,7 +339,6 @@ void scanKeysTask(void * pvParameters) {
         uint8_t knob1B = localInputs[4 * 4 + 1];
         uint8_t knob1Curr = (knob1B << 1) | knob1A;  // Quadrature state {B, A}
         sysState.knob1.update(knob1Curr);
-        moduleRole = (sysState.knob1.getRotation() % 2) ? SENDER : RECEIVER;
 
         if (!localInputs[4*5 + 0]){
             Serial.println("Knob 2S pressed");
@@ -346,7 +349,11 @@ void scanKeysTask(void * pvParameters) {
         } else if (!localInputs[4*6 + 0]){
             Serial.println("Knob 0S pressed");
         } else if (!localInputs[4*6 + 1]){
-            Serial.println("Knob 1S pressed");
+            xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+            moduleRole = (moduleRole == SENDER) ? RECEIVER : SENDER;
+            xSemaphoreGive(sysState.mutex);
+            Serial.println("Role changed");        
+           
         }
 
     }
@@ -362,6 +369,14 @@ void displayUpdateTask(void * pvParameters) {
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
         digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
 
+        // Update joystick values outside of the ISR
+        int rawJoyX = analogRead(JOYX_PIN);
+        int rawJoyY = analogRead(JOYY_PIN);
+        // Use the same ymin and ymax as in sampleISR (adjust if needed)
+        joyX12Val = map(rawJoyX, 800, 119, 0, 12);
+        joyY12Val = map(rawJoyY, 800, 119, 0, 12);
+
+
         // Read sysState.knob3Rotation under the mutex
         xSemaphoreTake(sysState.mutex, portMAX_DELAY);
         int rotationCopy = sysState.knob3.getRotation();
@@ -374,9 +389,9 @@ void displayUpdateTask(void * pvParameters) {
         // Display current JOYX and JOYY values in the form (12,34)
         u8g2.setCursor(75, 10);
         u8g2.print("(");
-        u8g2.print(analogRead(JOYX_PIN));
+        u8g2.print(joyX12Val);
         u8g2.print(",");
-        u8g2.print(analogRead(JOYY_PIN));
+        u8g2.print(joyY12Val);
         u8g2.print(")");
     
 
@@ -404,7 +419,7 @@ void displayUpdateTask(void * pvParameters) {
         //     Serial.print(sysState.RX_Message[i], HEX);
         //     Serial.print(" ");
         // }
-        Serial.println();
+        Serial.println(sysState.RX_Message[0]);
         u8g2.print(sysState.RX_Message[0] == 'P' ? "P" : "R");
         u8g2.print(sysState.RX_Message[1]);
         u8g2.print(sysState.RX_Message[2]);
@@ -469,15 +484,24 @@ void sampleISR() {
         // Do not generate audio in sender mode.
         return;
     }
+
+    int ymax = 119;
+    int ymin = 800;
     
     // Calculate effective step size based on moduleOctave.
     // (Assuming 4 is the base octave.)
+    
     uint32_t effectiveStep = currentStepSize;
+    
+    effectiveStep += ((int32_t)(joyY12Val - 6) * (effectiveStep / 100));
+
     if (moduleOctave > 4) {
         effectiveStep = effectiveStep << (moduleOctave - 4);
     } else if (moduleOctave < 4) {
         effectiveStep = effectiveStep >> (4 - moduleOctave);
     }
+
+    //effectiveStep = effectiveStep*(analogRead(JOYY_PIN)/472);
     
     phaseAcc += effectiveStep;
     int32_t Vout = (phaseAcc >> 24) - 128;
