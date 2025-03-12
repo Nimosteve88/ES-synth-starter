@@ -120,6 +120,7 @@ struct {
     Knob knob3;
     Knob knob2;
     Knob knob1;
+    Knob knob0;
     uint8_t RX_Message[8];
     } sysState;
 
@@ -247,13 +248,22 @@ std::bitset<4> readCols() {
 
 
     
+struct ActiveNote {
+    uint32_t stepSize;
+    uint32_t phaseAcc;
+};
 
+#define MAX_POLYPHONY 12  // Maximum number of simultaneous notes
+
+ActiveNote activeNotes[MAX_POLYPHONY];
+uint8_t activeNoteCount = 0;
 
 
 // ----------------------- FREE RTOS TASKS ----------------------------------- //
 
 // In your global variables, change the previous state bitset to track 16 keys:
 static std::bitset<16> prevKeys;  // Now tracks keys 0-15
+static bool prevKnob0SPressed = false;
 
 // Task to scan the key matrix at a 20-50ms interval (priority 2)
 void scanKeysTask(void * pvParameters) {
@@ -274,6 +284,7 @@ void scanKeysTask(void * pvParameters) {
     const TickType_t xFrequency = 20 / portTICK_PERIOD_MS;
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
+    static int prevTranspose = 0;
 
     while (1) {
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
@@ -303,6 +314,7 @@ void scanKeysTask(void * pvParameters) {
             }
         }
         currentStepSize = localStepSize;
+
         // Process note press/release events for keys 0-11:
         uint8_t currentOctave = moduleOctave;
         for (uint8_t key = 0; key < 12; key++) {
@@ -310,51 +322,73 @@ void scanKeysTask(void * pvParameters) {
             bool previousState = prevKeys[key];
             if (currentState != previousState) {
                 // Send messages only in SENDER mode.
-                if (moduleRole == SENDER) {
+                //if (moduleRole == SENDER) {
                     uint8_t TX_Message[8] = {0};
                     TX_Message[0] = currentState ? 'P' : 'R';
                     TX_Message[1] = currentOctave;
                     TX_Message[2] = key;
                     xQueueSend(msgOutQ, TX_Message, portMAX_DELAY);
-                }
+                //}
             }
             prevKeys[key] = currentState;
         }
         
 
         // 4) Decode knob 3 (remains unchanged)
-        uint8_t knob3A = localInputs[3 * 4 + 0];
-        uint8_t knob3B = localInputs[3 * 4 + 1];
+        uint8_t knob3A = localInputs[12];
+        uint8_t knob3B = localInputs[13];
         uint8_t knob3Curr = (knob3B << 1) | knob3A;  // Quadrature state {B, A}
         sysState.knob3.update(knob3Curr);
 
         // 5) Decode knob 2 (remains unchanged)
-        uint8_t knob2A = localInputs[3 * 4 + 2];
-        uint8_t knob2B = localInputs[3 * 4 + 3];
+        uint8_t knob2A = localInputs[14];
+        uint8_t knob2B = localInputs[15];
         uint8_t knob2Curr = (knob2B << 1) | knob2A;  // Quadrature state {B, A}
         sysState.knob2.update(knob2Curr);
 
         // 6) Decode knob 1 (remains unchanged)
-        uint8_t knob1A = localInputs[4 * 4 + 0];
-        uint8_t knob1B = localInputs[4 * 4 + 1];
+        uint8_t knob1A = localInputs[16];
+        uint8_t knob1B = localInputs[17];
         uint8_t knob1Curr = (knob1B << 1) | knob1A;  // Quadrature state {B, A}
         sysState.knob1.update(knob1Curr);
 
-        if (!localInputs[4*5 + 0]){
+        // 7) Decode knob 0 (remains unchanged)
+        uint8_t knob0A = localInputs[18];
+        uint8_t knob0B = localInputs[19];
+        uint8_t knob0Curr = (knob0B << 1) | knob0A;  // Quadrature state {B, A}
+        prevTranspose = sysState.knob0.getRotation();
+        sysState.knob0.update(knob0Curr);
+        int newTranspose = sysState.knob0.getRotation(); 
+
+        if (newTranspose > prevTranspose) {
+            Serial.println("Transposing Up");
+
+        } else if (newTranspose < prevTranspose) {
+            Serial.println("Transposing Down");
+        }
+
+        //Serial.println(newTranspose - 4);
+
+        bool knob0SPressed = !localInputs[25];
+
+        if (!localInputs[20]){
             Serial.println("Knob 2S pressed");
-        } else if (!localInputs[4*5 + 1]){
+        } else if (!localInputs[21]){
             Serial.println("Knob 3S pressed");
-        } else if (!localInputs[4*5 + 2]){
+        } else if (!localInputs[22]){
             Serial.println("Joystick S pressed");
-        } else if (!localInputs[4*6 + 0]){
+        } else if (!localInputs[24]){
             Serial.println("Knob 0S pressed");
-        } else if (!localInputs[4*6 + 1]){
+        } else if (knob0SPressed && !prevKnob0SPressed){
+            // Knob 1 S (!localInputs[25])
             xSemaphoreTake(sysState.mutex, portMAX_DELAY);
             moduleRole = (moduleRole == SENDER) ? RECEIVER : SENDER;
             xSemaphoreGive(sysState.mutex);
             Serial.println("Role changed");        
-           
         }
+        prevKnob0SPressed = knob0SPressed;
+
+        
 
     }
 #endif
@@ -419,7 +453,7 @@ void displayUpdateTask(void * pvParameters) {
         //     Serial.print(sysState.RX_Message[i], HEX);
         //     Serial.print(" ");
         // }
-        Serial.println(sysState.RX_Message[0]);
+        //Serial.println(sysState.RX_Message[0]);
         u8g2.print(sysState.RX_Message[0] == 'P' ? "P" : "R");
         u8g2.print(sysState.RX_Message[1]);
         u8g2.print(sysState.RX_Message[2]);
@@ -430,6 +464,10 @@ void displayUpdateTask(void * pvParameters) {
     }
 }
 
+
+
+
+
 // -------------------------- DECODE TASK  ----------------------------------- //
 
 void decodeTask(void * pvParameters) {
@@ -437,26 +475,52 @@ void decodeTask(void * pvParameters) {
     for (;;) {
         // Block until a message is available:
         if (xQueueReceive(msgInQ, localMsg, portMAX_DELAY) == pdPASS) {
-            if (localMsg[0] == 'R') {  // Release message: set step size to 0.
-                __atomic_store_n(&currentStepSize, (uint32_t)0, __ATOMIC_RELAXED);
-            }
-            else if (localMsg[0] == 'P') {  // Press message: convert note and octave.
-                uint8_t octave = localMsg[1];
+            if (localMsg[0] == 'R') {  // Release message: remove the note.
                 uint8_t note = localMsg[2];
-                if (note < 12) {
-                    uint32_t step = stepSizes[note];
-                    if (octave > 4) {
-                        step = step << (octave - 4);
-                    } else if (octave < 4) {
-                        step = step >> (4 - octave);
+                for (uint8_t i = 0; i < activeNoteCount; i++) {
+                    if (activeNotes[i].stepSize == stepSizes[note]) {
+                        // Remove the note by shifting the remaining notes
+                        for (uint8_t j = i; j < activeNoteCount - 1; j++) {
+                            activeNotes[j] = activeNotes[j + 1];
+                        }
+                        activeNoteCount--;
+                        break;
                     }
-                    __atomic_store_n(&currentStepSize, step, __ATOMIC_RELAXED);
                 }
             }
+            else if (localMsg[0] == 'P') {  // Press message: add the note.
+                uint8_t octave = localMsg[1];
+                uint8_t note = localMsg[2];
+                if (note < 12 && activeNoteCount < MAX_POLYPHONY) {
+                    uint32_t step = stepSizes[note];
+                    // Remove octave scaling here – store the raw step size.
+                    activeNotes[activeNoteCount].stepSize = step;
+                    activeNotes[activeNoteCount].phaseAcc = 0;
+                    activeNoteCount++;
+                }
+            }
+            // Debug: print current polyphony
+            Serial.print("Active notes count: ");
+            Serial.println(activeNoteCount);
+            Serial.print("Active notes: ");
+            for (uint8_t i = 0; i < activeNoteCount; i++) {
+                Serial.print(activeNotes[i].stepSize);
+                Serial.print(" ");
+            }
+            Serial.println();
+
+            // Reset activeNotes
+            // for (uint8_t i = 0; i < activeNoteCount; i++) {
+            //     activeNotes[i].stepSize = 0;
+            //     activeNotes[i].phaseAcc = 0;
+            // }
+            
             // Update the global RX_Message
             xSemaphoreTake(sysState.mutex, portMAX_DELAY);
             memcpy(sysState.RX_Message, localMsg, sizeof(sysState.RX_Message));
             xSemaphoreGive(sysState.mutex);
+
+            
         }
     }
 }
@@ -480,47 +544,87 @@ void CAN_TX_Task (void * pvParameters) {
 // ------------------------- TIMER ISR FOR AUDIO ----------------------------- //
 
 void sampleISR() {
+    // Do not generate audio in sender mode.
     if (moduleRole == SENDER) {
-        // Do not generate audio in sender mode.
         return;
     }
 
-    int ymax = 119;
-    int ymin = 800;
-    
-    // Calculate effective step size based on moduleOctave.
-    // (Assuming 4 is the base octave.)
-    
+    // Transposition: use a multiplier array for semitone shifts.
+    const float transposeMultipliers[9] = {
+        0.7937098f,  // -4 semitones
+        0.8409038f,  // -3 semitones
+        0.8909039f,  // -2 semitones
+        0.943877f,   // -1 semitone
+        1.000000f,   // Base (no transposition)
+        1.0594600f,  // +1 semitone
+        1.1224555f,  // +2 semitones
+        1.1891967f,  // +3 semitones
+        1.2599063f   // +4 semitones
+    };
+
+    // Get current transposition (from knob0)
+    int transposition = sysState.knob0.getRotation();
     uint32_t effectiveStep = currentStepSize;
-    
+    effectiveStep = effectiveStep * transposeMultipliers[transposition];
     effectiveStep += ((int32_t)(joyY12Val - 6) * (effectiveStep / 100));
 
-    if (moduleOctave > 4) {
-        effectiveStep = effectiveStep << (moduleOctave - 4);
-    } else if (moduleOctave < 4) {
-        effectiveStep = effectiveStep >> (4 - moduleOctave);
-    }
-
-    //effectiveStep = effectiveStep*(analogRead(JOYY_PIN)/472);
-    
-    phaseAcc += effectiveStep;
-    int32_t Vout = (phaseAcc >> 24) - 128;
-
-    // Optionally update moduleOctave based on knob2 (overriding moduleOctave if desired)
+    // Update octave based on knob2 (constrain to 0-8)
     int knobOctave = sysState.knob2.getRotation();
     if (knobOctave < 0) knobOctave = 0;
     if (knobOctave > 8) knobOctave = 8;
-    // Decide whether to use knobOctave or moduleOctave for the frequency scaling:
     moduleOctave = knobOctave;
 
-    // Read the volume (from knob3) and apply log taper volume control:
+    // Apply octave scaling to the effective step (main voice).
+    uint32_t scaledEffectiveStep = effectiveStep;
+    if (moduleOctave > 4) {
+        scaledEffectiveStep <<= (moduleOctave - 4);
+    } else if (moduleOctave < 4) {
+        scaledEffectiveStep >>= (4 - moduleOctave);
+    }
+
+    // Update phase accumulator for the main note.
+    phaseAcc += scaledEffectiveStep;
+    int32_t mainOutput = (phaseAcc >> 24) - 128;
+
+    // Process polyphonic voices with the same octave scaling.
+    int32_t polyOutput = 0;
+    for (uint8_t i = 0; i < activeNoteCount; i++) {
+        uint32_t noteStep = activeNotes[i].stepSize;
+        if (moduleOctave > 4) {
+            noteStep <<= (moduleOctave - 4);
+        } else if (moduleOctave < 4) {
+            noteStep >>= (4 - moduleOctave);
+        }
+        activeNotes[i].phaseAcc += noteStep;
+        polyOutput += ((activeNotes[i].phaseAcc >> 24) - 128);
+    }
+
+    // Mix the main note and polyphonic voices.
+    int32_t mixedOutput = mainOutput + polyOutput;
+
+    // Optionally, if many voices can play, you might normalize by activeNoteCount:
+    // if (activeNoteCount > 0) {
+    //     mixedOutput = mixedOutput / (activeNoteCount + 1);  // +1 for the main note
+    // }
+
+    // Get volume from knob3 and constrain it to 0-8.
     int volume = sysState.knob3.getRotation();
     if (volume < 0) volume = 0;
     if (volume > 8) volume = 8;
-    Vout = Vout >> (8 - volume);
 
-    analogWrite(OUTR_PIN, Vout + 128);
+    // Apply a linear volume multiplier.
+    // Instead of a bit-shift, scale the amplitude linearly.
+    // (Using integer math: multiply by volume then divide by 8.)
+    int32_t scaledAC = (mixedOutput * volume) / 8;
+
+    // Add the DC offset back and constrain to valid 8-bit range.
+    int finalOutput = scaledAC + 128;
+    if (finalOutput < 0) finalOutput = 0;
+    if (finalOutput > 255) finalOutput = 255;
+
+    analogWrite(OUTR_PIN, finalOutput);
 }
+
 
 void CAN_RX_ISR (void) {
 	uint8_t RX_Message_ISR[8];
@@ -566,6 +670,12 @@ void setup() {
     setOutMuxBit(DRST_BIT, HIGH);  //Release display logic reset
     u8g2.begin();
     setOutMuxBit(DEN_BIT, HIGH);  //Enable display power supply
+
+    for (uint8_t i = 0; i < MAX_POLYPHONY; i++) {
+        activeNotes[i].stepSize = 0;
+        activeNotes[i].phaseAcc = 0;
+    }
+    activeNoteCount = 0;
     
     
     // Initialize audio sample timer
@@ -605,6 +715,8 @@ void setup() {
     // Always create decodeTask so that received messages are processed.
     TaskHandle_t decodeTaskHandle = NULL;
     xTaskCreate(decodeTask, "decodeTask", 128, NULL, 1, &decodeTaskHandle);
+
+
 
     if (moduleRole == SENDER) {
         TaskHandle_t CAN_TX_Handle = NULL;
