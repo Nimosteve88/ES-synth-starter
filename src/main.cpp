@@ -20,6 +20,12 @@ uint8_t moduleOctave = 4;         // Default octave number (can be changed at ru
 volatile int joyX12Val = 6;  // Default mid value (0 to 12)
 volatile int joyY12Val = 6;  // Default mid value (0 to 12)
 
+enum WaveformType { SAWTOOTH = 0, PIANO, TRIANGLE, SINE, SQUARE, PULSE, NOISE };
+volatile WaveformType currentWaveform = SAWTOOTH;  // Default waveform
+
+//create a sine lookup table
+const int SINE_TABLE_SIZE = 256;
+
 
 
 // ------------------------- Knob Class -------------------------------------- //
@@ -213,6 +219,63 @@ const char* noteNames[12] = {
     "F#", "G", "G#", "A", "A#", "B"
 };
 
+
+// Compute the sample based on the phase accumulator and current waveform
+int computeWaveform(uint32_t phase) {
+    uint8_t x = phase >> 24;  // Use the top 8 bits (0-255) as our phase index
+    int sample = 0;
+    switch(currentWaveform) {
+        case SAWTOOTH:
+            // Linear ramp from -128 to +127.
+            sample = (int)x - 128;
+            break;
+        case TRIANGLE:
+            // Triangle waveform by folding the sawtooth.
+            if (x < 128)
+                sample = (x * 2) - 128;
+            else
+                sample = ((255 - x) * 2) - 128;
+            break;
+        case SINE:
+            {
+                // Compute sine using floating-point math.
+                float angle = (x / 256.0f) * 6.28318530718f;  // Convert x to an angle (0 to 2π)
+                sample = (int)(sinf(angle) * 127.0f);
+            }
+            break;
+        case SQUARE:
+            // Square wave: output high for first half of the cycle, low for the second half.
+            sample = (x < 128) ? 127 : -127;
+            break;
+        case PULSE:
+            {
+                // Pulse wave: like square but with an adjustable duty cycle.
+                // Let's use knob3 as the duty cycle control (range 0 to 8).
+                int duty = sysState.knob3.getRotation(); // 0 (short pulse) to 8 (long pulse)
+                // Map duty (0-8) to a threshold value in the range 0-255.
+                int threshold = (duty * 256) / 9;  
+                sample = (x < threshold) ? 127 : -127;
+            }
+            break;
+        case NOISE:
+            {
+                // Generate pseudo-random noise. This simple LCG uses a static seed.
+                static uint32_t noiseSeed = 0x12345678;
+                noiseSeed = noiseSeed * 1664525UL + 1013904223UL;
+                // Use the lower 8 bits and center the output.
+                sample = (int)(noiseSeed & 0xFF) - 128;
+            }
+            break;
+        
+            
+        default:
+            sample = (int)x - 128;
+            break;
+    }
+    return sample;
+}
+
+
 // --------------------------- HELPER FUNCTIONS ------------------------------ //
 
 // Set the row lines on the 3-to-8 decoder based on a row number
@@ -251,6 +314,7 @@ std::bitset<4> readCols() {
 struct ActiveNote {
     uint32_t stepSize;
     uint32_t phaseAcc;
+    uint32_t elapsed;
 };
 
 #define MAX_POLYPHONY 12  // Maximum number of simultaneous notes
@@ -263,6 +327,7 @@ uint8_t activeNoteCount = 0;
 
 // In your global variables, change the previous state bitset to track 16 keys:
 static std::bitset<16> prevKeys;  // Now tracks keys 0-15
+static bool prevKnob1SPressed = false;
 static bool prevKnob0SPressed = false;
 
 // Task to scan the key matrix at a 20-50ms interval (priority 2)
@@ -369,7 +434,8 @@ void scanKeysTask(void * pvParameters) {
 
         //Serial.println(newTranspose - 4);
 
-        bool knob0SPressed = !localInputs[25];
+        bool knob1SPressed = !localInputs[25];
+        bool knob0SPressed = !localInputs[24];
 
         if (!localInputs[20]){
             Serial.println("Knob 2S pressed");
@@ -377,15 +443,28 @@ void scanKeysTask(void * pvParameters) {
             Serial.println("Knob 3S pressed");
         } else if (!localInputs[22]){
             Serial.println("Joystick S pressed");
-        } else if (!localInputs[24]){
-            Serial.println("Knob 0S pressed");
         } else if (knob0SPressed && !prevKnob0SPressed){
+            //Serial.println("Knob 0S pressed");
+            xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+            currentWaveform = (WaveformType)(((int)currentWaveform + 1) % 6);
+            xSemaphoreGive(sysState.mutex);
+            Serial.print("Waveform changed to: ");
+            if (currentWaveform == SAWTOOTH) Serial.println("Sawtooth");
+            else if (currentWaveform == TRIANGLE) Serial.println("Triangle");
+            else if (currentWaveform == SINE) Serial.println("Sine");
+            else if (currentWaveform == SQUARE) Serial.println("Square");
+            else if (currentWaveform == PULSE) Serial.println("Pulse");
+            else if (currentWaveform == NOISE) Serial.println("Noise");
+            else if (currentWaveform == PIANO) Serial.println("Piano");
+
+        } else if (knob1SPressed && !prevKnob1SPressed){
             // Knob 1 S (!localInputs[25])
             xSemaphoreTake(sysState.mutex, portMAX_DELAY);
             moduleRole = (moduleRole == SENDER) ? RECEIVER : SENDER;
             xSemaphoreGive(sysState.mutex);
             Serial.println("Role changed");        
         }
+        prevKnob1SPressed = knob1SPressed;
         prevKnob0SPressed = knob0SPressed;
 
         
@@ -430,18 +509,29 @@ void displayUpdateTask(void * pvParameters) {
     
 
         // Display key matrix state
-        u8g2.setCursor(2,20);
-        xSemaphoreTake(sysState.mutex, portMAX_DELAY);
-        u8g2.print(sysState.inputs.to_ulong(), HEX);
-        xSemaphoreGive(sysState.mutex);
+        // u8g2.setCursor(2,20);
+        // xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+        // u8g2.print(sysState.inputs.to_ulong(), HEX);
+        // xSemaphoreGive(sysState.mutex);
+
+        // Display the current waveform
+        u8g2.setCursor(2, 20);
+        if (currentWaveform == SAWTOOTH) u8g2.print("Sawtooth");
+        else if (currentWaveform == TRIANGLE) u8g2.print("Triangle");
+        else if (currentWaveform == SINE) u8g2.print("Sine");
+        else if (currentWaveform == SQUARE) u8g2.print("Square");
+        else if (currentWaveform == PULSE) u8g2.print("Pulse");
+        else if (currentWaveform == NOISE) u8g2.print("Noise");
+        else if (currentWaveform == PIANO) u8g2.print("Piano");
+
 
         u8g2.setCursor(2, 30);
-        u8g2.print("Knob: ");
+        u8g2.print("Volume: ");
         // Read the knob value using the class method
         u8g2.print(rotationCopy);
 
         u8g2.setCursor(66, 20);
-        u8g2.print("Octave: ");
+        u8g2.print("Pitch: ");
         u8g2.print(moduleOctave);
 
 
@@ -496,6 +586,7 @@ void decodeTask(void * pvParameters) {
                     // Remove octave scaling here – store the raw step size.
                     activeNotes[activeNoteCount].stepSize = step;
                     activeNotes[activeNoteCount].phaseAcc = 0;
+                    activeNotes[activeNoteCount].elapsed = 0;
                     activeNoteCount++;
                 }
             }
@@ -540,90 +631,133 @@ void CAN_TX_Task (void * pvParameters) {
     }
 }
 
+// Compute an exponential decay envelope.
+// elapsed is in samples; SAMPLE_RATE is 22050 Hz.
+float getEnvelope(uint32_t elapsed) {
+    // Convert samples to seconds.
+    float t = elapsed / (float)SAMPLE_RATE;
+    // A decay rate multiplier (adjust to taste; higher value = faster decay).
+    return expf(-t * 3.0f);
+}
+
+// Compute a pitch drop factor: start slightly high and drop to 1.0 within ~50ms.
+float getPitchFactor(uint32_t elapsed) {
+    float t = elapsed / (float)SAMPLE_RATE; // time in seconds
+    // For instance, start at 1.05 and drop to 1.0 within 50ms.
+    float factor = 1.05f - 0.05f * fminf(t / 0.05f, 1.0f);
+    return factor;
+}
+
 
 // ------------------------- TIMER ISR FOR AUDIO ----------------------------- //
 
 void sampleISR() {
-    // Do not generate audio in sender mode.
+    // Do not generate audio in SENDER mode.
     if (moduleRole == SENDER) {
         return;
     }
 
-    // Transposition: use a multiplier array for semitone shifts.
+    // Transposition multipliers for non-piano modes.
     const float transposeMultipliers[9] = {
-        0.7937098f,  // -4 semitones
-        0.8409038f,  // -3 semitones
-        0.8909039f,  // -2 semitones
-        0.943877f,   // -1 semitone
-        1.000000f,   // Base (no transposition)
-        1.0594600f,  // +1 semitone
-        1.1224555f,  // +2 semitones
-        1.1891967f,  // +3 semitones
-        1.2599063f   // +4 semitones
+        0.7937098f, 0.8409038f, 0.8909039f, 0.943877f,
+        1.000000f,  1.0594600f, 1.1224555f, 1.1891967f, 1.2599063f
     };
 
-    // Get current transposition (from knob0)
-    int transposition = sysState.knob0.getRotation();
-    uint32_t effectiveStep = currentStepSize;
-    effectiveStep = effectiveStep * transposeMultipliers[transposition];
-    effectiveStep += ((int32_t)(joyY12Val - 6) * (effectiveStep / 100));
-
-    // Update octave based on knob2 (constrain to 0-8)
+    // Update octave from knob2.
     int knobOctave = sysState.knob2.getRotation();
     if (knobOctave < 0) knobOctave = 0;
     if (knobOctave > 8) knobOctave = 8;
     moduleOctave = knobOctave;
 
-    // Apply octave scaling to the effective step (main voice).
-    uint32_t scaledEffectiveStep = effectiveStep;
-    if (moduleOctave > 4) {
-        scaledEffectiveStep <<= (moduleOctave - 4);
-    } else if (moduleOctave < 4) {
-        scaledEffectiveStep >>= (4 - moduleOctave);
-    }
-
-    // Update phase accumulator for the main note.
-    phaseAcc += scaledEffectiveStep;
-    int32_t mainOutput = (phaseAcc >> 24) - 128;
-
-    // Process polyphonic voices with the same octave scaling.
-    int32_t polyOutput = 0;
-    for (uint8_t i = 0; i < activeNoteCount; i++) {
-        uint32_t noteStep = activeNotes[i].stepSize;
-        if (moduleOctave > 4) {
-            noteStep <<= (moduleOctave - 4);
-        } else if (moduleOctave < 4) {
-            noteStep >>= (4 - moduleOctave);
+    // For piano mode, process each active note with its own envelope and pitch drop.
+    if (currentWaveform == PIANO) {
+        int32_t mixSum = 0;
+        uint8_t voices = 0;
+        // Iterate over active notes, and remove those that have decayed completely.
+        for (uint8_t i = 0; i < activeNoteCount; ) {
+            activeNotes[i].elapsed++;
+            float env = getEnvelope(activeNotes[i].elapsed);
+            // If the note is nearly silent, remove it from the list.
+            if (env < 0.01f) {
+                // Shift remaining notes down.
+                for (uint8_t j = i; j < activeNoteCount - 1; j++) {
+                    activeNotes[j] = activeNotes[j + 1];
+                }
+                activeNoteCount--;
+                // Do not increment i, as a new note is now at position i.
+                continue;
+            }
+            float pitchFactor = getPitchFactor(activeNotes[i].elapsed);
+            uint32_t noteStep = activeNotes[i].stepSize;
+            if (moduleOctave > 4) {
+                noteStep <<= (moduleOctave - 4);
+            } else if (moduleOctave < 4) {
+                noteStep >>= (4 - moduleOctave);
+            }
+            uint32_t modifiedStep = (uint32_t)(noteStep * pitchFactor);
+            activeNotes[i].phaseAcc += modifiedStep;
+    
+            uint8_t phase = activeNotes[i].phaseAcc >> 24;
+            float angle = (phase / 256.0f) * 6.28318530718f; // 2π radians
+            int sample = (int)(sinf(angle) * 127.0f);
+            sample = (int)(sample * env);
+            mixSum += sample;
+            voices++;
+            i++;
         }
-        activeNotes[i].phaseAcc += noteStep;
-        polyOutput += ((activeNotes[i].phaseAcc >> 24) - 128);
+        int normalizedSample = (voices > 0) ? mixSum / voices : 0;
+        int volume = sysState.knob3.getRotation();
+        if (volume < 0) volume = 0;
+        if (volume > 8) volume = 8;
+        int scaledSample = (normalizedSample * volume) / 8;
+        int finalOutput = scaledSample + 128;
+        if (finalOutput < 0) finalOutput = 0;
+        if (finalOutput > 255) finalOutput = 255;
+        analogWrite(OUTR_PIN, finalOutput);
+    } else {
+        // Non-PIANO mode processing as before.
+        int transposition = sysState.knob0.getRotation();
+        uint32_t effectiveStep = currentStepSize;
+        effectiveStep = effectiveStep * transposeMultipliers[transposition];
+        effectiveStep += ((int32_t)(joyY12Val - 6) * (effectiveStep / 100));
+    
+        uint32_t scaledEffectiveStep = effectiveStep;
+        if (moduleOctave > 4) {
+            scaledEffectiveStep <<= (moduleOctave - 4);
+        } else if (moduleOctave < 4) {
+            scaledEffectiveStep >>= (4 - moduleOctave);
+        }
+    
+        phaseAcc += scaledEffectiveStep;
+        int mainSample = computeWaveform(phaseAcc);
+    
+        int32_t mixSum = mainSample;
+        uint8_t voices = 1;
+        for (uint8_t i = 0; i < activeNoteCount; i++) {
+            uint32_t noteStep = activeNotes[i].stepSize;
+            if (moduleOctave > 4) {
+                noteStep <<= (moduleOctave - 4);
+            } else if (moduleOctave < 4) {
+                noteStep >>= (4 - moduleOctave);
+            }
+            activeNotes[i].phaseAcc += noteStep;
+            mixSum += computeWaveform(activeNotes[i].phaseAcc);
+            voices++;
+        }
+        int normalizedSample = mixSum / voices;
+        int volume = sysState.knob3.getRotation();
+        if (volume < 0) volume = 0;
+        if (volume > 8) volume = 8;
+        int scaledSample = (normalizedSample * volume) / 8;
+        int finalOutput = scaledSample + 128;
+        if (finalOutput < 0) finalOutput = 0;
+        if (finalOutput > 255) finalOutput = 255;
+        analogWrite(OUTR_PIN, finalOutput);
     }
-
-    // Mix the main note and polyphonic voices.
-    int32_t mixedOutput = mainOutput + polyOutput;
-
-    // Optionally, if many voices can play, you might normalize by activeNoteCount:
-    // if (activeNoteCount > 0) {
-    //     mixedOutput = mixedOutput / (activeNoteCount + 1);  // +1 for the main note
-    // }
-
-    // Get volume from knob3 and constrain it to 0-8.
-    int volume = sysState.knob3.getRotation();
-    if (volume < 0) volume = 0;
-    if (volume > 8) volume = 8;
-
-    // Apply a linear volume multiplier.
-    // Instead of a bit-shift, scale the amplitude linearly.
-    // (Using integer math: multiply by volume then divide by 8.)
-    int32_t scaledAC = (mixedOutput * volume) / 8;
-
-    // Add the DC offset back and constrain to valid 8-bit range.
-    int finalOutput = scaledAC + 128;
-    if (finalOutput < 0) finalOutput = 0;
-    if (finalOutput > 255) finalOutput = 255;
-
-    analogWrite(OUTR_PIN, finalOutput);
+    
 }
+
+
 
 
 void CAN_RX_ISR (void) {
