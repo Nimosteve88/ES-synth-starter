@@ -11,6 +11,50 @@
 //#define DISABLE_ISRS
 //#define TEST_SCANKEYS
 
+
+
+#define MEASURE_TASK_TIMES  // Uncomment to enable task/ISR timing measurements
+#define MEASURE_CPU_USAGE   // Uncomment if you want a rough CPU usage measurement
+
+#ifdef MEASURE_TASK_TIMES
+// Global variables to store worst-case (max) execution times in microseconds
+volatile uint32_t maxScanKeysTime = 0;
+volatile uint32_t maxDisplayUpdateTime = 0;
+volatile uint32_t maxDecodeTime = 0;
+volatile uint32_t maxCAN_TX_Time = 0;
+volatile uint32_t maxSampleISRTime = 0;
+
+// Macro to mark start and end of a task section
+#define TASK_START()  uint32_t tStart = micros()
+#define TASK_END(maxVar)  do {                      \
+    uint32_t tEnd = micros();                       \
+    uint32_t elapsed = tEnd - tStart;               \
+    if (elapsed > maxVar) maxVar = elapsed;         \
+} while(0)
+
+#else
+// If measurement is disabled, define empty macros
+#define TASK_START()   
+#define TASK_END(maxVar)
+#endif
+
+
+#ifdef MEASURE_CPU_USAGE
+// Rough CPU usage measurement via Idle Hook
+// The idea: we count how often the idle task runs in a known time window.
+volatile uint32_t idleCounter = 0;
+volatile uint32_t lastIdleCount = 0;
+volatile float cpuUsagePercent = 0.0f;
+
+// FreeRTOS will call this whenever no tasks are ready to run
+extern "C" void vApplicationIdleHook(void) {
+    idleCounter++;
+}
+#endif
+
+
+
+
 enum ModuleRole { SENDER, RECEIVER };
 ModuleRole moduleRole = SENDER;   // Change to RECEIVER for receiver modules
 
@@ -352,6 +396,7 @@ void scanKeysTask(void * pvParameters) {
     static int prevTranspose = 0;
 
     while (1) {
+        TASK_START(); // Mark start time
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
 
         // 1) Scan the full 8x4 matrix into localInputs (16 keys)
@@ -467,7 +512,7 @@ void scanKeysTask(void * pvParameters) {
         prevKnob1SPressed = knob1SPressed;
         prevKnob0SPressed = knob0SPressed;
 
-        
+        TASK_END(maxScanKeysTime); // Update worst-case time
 
     }
 #endif
@@ -479,6 +524,7 @@ void displayUpdateTask(void * pvParameters) {
     TickType_t xLastWakeTime = xTaskGetTickCount();
 
     while (1) {
+        TASK_START();
         vTaskDelayUntil(&xLastWakeTime, xFrequency);
         digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
 
@@ -551,6 +597,7 @@ void displayUpdateTask(void * pvParameters) {
 
         u8g2.sendBuffer();
         digitalToggle(LED_BUILTIN);
+        TASK_END(maxDisplayUpdateTime);
     }
 }
 
@@ -565,6 +612,7 @@ void decodeTask(void * pvParameters) {
     for (;;) {
         // Block until a message is available:
         if (xQueueReceive(msgInQ, localMsg, portMAX_DELAY) == pdPASS) {
+            TASK_START();
             if (localMsg[0] == 'R') {  // Release message: remove the note.
                 uint8_t note = localMsg[2];
                 for (uint8_t i = 0; i < activeNoteCount; i++) {
@@ -591,14 +639,14 @@ void decodeTask(void * pvParameters) {
                 }
             }
             // Debug: print current polyphony
-            Serial.print("Active notes count: ");
-            Serial.println(activeNoteCount);
-            Serial.print("Active notes: ");
-            for (uint8_t i = 0; i < activeNoteCount; i++) {
-                Serial.print(activeNotes[i].stepSize);
-                Serial.print(" ");
-            }
-            Serial.println();
+            // Serial.print("Active notes count: ");
+            // Serial.println(activeNoteCount);
+            // Serial.print("Active notes: ");
+            // for (uint8_t i = 0; i < activeNoteCount; i++) {
+            //     Serial.print(activeNotes[i].stepSize);
+            //     Serial.print(" ");
+            // }
+            // Serial.println();
 
             // Reset activeNotes
             // for (uint8_t i = 0; i < activeNoteCount; i++) {
@@ -610,7 +658,7 @@ void decodeTask(void * pvParameters) {
             xSemaphoreTake(sysState.mutex, portMAX_DELAY);
             memcpy(sysState.RX_Message, localMsg, sizeof(sysState.RX_Message));
             xSemaphoreGive(sysState.mutex);
-
+            TASK_END(maxDecodeTime);
             
         }
     }
@@ -626,8 +674,10 @@ void CAN_TX_Task (void * pvParameters) {
     uint8_t msgOut[8];
     while (1) {
         xQueueReceive(msgOutQ, msgOut, portMAX_DELAY);
+        TASK_START();
         xSemaphoreTake(CAN_TX_Semaphore, portMAX_DELAY);
         CAN_TX(0x123, msgOut);
+        TASK_END(maxCAN_TX_Time);
     }
 }
 
@@ -652,11 +702,14 @@ float getPitchFactor(uint32_t elapsed) {
 // ------------------------- TIMER ISR FOR AUDIO ----------------------------- //
 
 void sampleISR() {
+
     // Do not generate audio in SENDER mode.
     if (moduleRole == SENDER) {
         return;
     }
-
+#ifdef MEASURE_TASK_TIMES
+    uint32_t startISR = DWT->CYCCNT;
+#endif
     // Transposition multipliers for non-piano modes.
     const float transposeMultipliers[9] = {
         0.7937098f, 0.8409038f, 0.8909039f, 0.943877f,
@@ -754,6 +807,16 @@ void sampleISR() {
         if (finalOutput > 255) finalOutput = 255;
         analogWrite(OUTR_PIN, finalOutput);
     }
+#ifdef MEASURE_TASK_TIMES
+    uint32_t endISR = DWT->CYCCNT;
+    // Convert cycles to microseconds:
+    uint32_t elapsedCycles = endISR - startISR;
+    // Assuming SystemCoreClock is defined (e.g., in Hz)
+    uint32_t elapsed = elapsedCycles / (SystemCoreClock / 1000000);
+    if (elapsed > maxSampleISRTime) {
+        maxSampleISRTime = elapsed;
+    }
+#endif
     
 }
 
@@ -770,6 +833,89 @@ void CAN_RX_ISR (void) {
 void CAN_TX_ISR (void) {
 	xSemaphoreGiveFromISR(CAN_TX_Semaphore, NULL);
 }
+
+
+////////////////////////////////////////////////// DEBUG MONITOR TASK //////////////////////////////////////////////////
+#ifdef MEASURE_TASK_TIMES
+extern volatile uint32_t maxScanKeysTime;
+extern volatile uint32_t maxDisplayUpdateTime;
+extern volatile uint32_t maxDecodeTime;
+extern volatile uint32_t maxCAN_TX_Time;
+extern volatile uint32_t maxSampleISRTime;
+#endif
+
+#ifdef MEASURE_CPU_USAGE
+extern volatile uint32_t idleCounter;
+extern volatile uint32_t lastIdleCount;
+extern volatile float cpuUsagePercent;
+#endif
+
+#ifdef MEASURE_CPU_USAGE
+volatile uint32_t calibratedIdleMax = 50000;  // Default value; will be updated by calibration.
+
+// Calibrate idle ticks over a 1-second period when the system is idle.
+void calibrateIdleTicks() {
+    Serial.println("Calibrating idle tick count...");
+    idleCounter = 0;                // Reset idle counter.
+    delay(1000);                    // Wait 1 second.
+    calibratedIdleMax = idleCounter;
+    Serial.print("Calibrated idle ticks per second: ");
+    Serial.println(calibratedIdleMax);
+}
+#endif
+
+void debugMonitorTask(void * pvParameters) {
+    const TickType_t xFrequency = 1000 / portTICK_PERIOD_MS; // once per second
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+
+    while (1) {
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
+
+#ifdef MEASURE_TASK_TIMES
+        Serial.println("----- Task Timing (us) -----");
+        Serial.print("maxScanKeysTime: "); Serial.println(maxScanKeysTime);
+        Serial.print("maxDisplayUpdateTime: "); Serial.println(maxDisplayUpdateTime);
+        Serial.print("maxDecodeTime: "); Serial.println(maxDecodeTime);
+        Serial.print("maxCAN_TX_Time: "); Serial.println(maxCAN_TX_Time);
+        Serial.print("maxSampleISRTime: "); Serial.println(maxSampleISRTime);
+        Serial.println("----------------------------\n");
+#endif
+
+#ifdef MEASURE_CPU_USAGE
+        // We'll measure how many times the idle task was called in 1 second
+        uint32_t currentIdleCount = idleCounter;
+        uint32_t deltaIdle = currentIdleCount - lastIdleCount;
+        lastIdleCount = currentIdleCount;
+
+        // The bigger deltaIdle is, the more time we spent idle.
+        // CPU usage = (1 - (idleTicks / totalTicks)) * 100%
+        // But we don't know the absolute maximum idle ticks per second 
+        // without calibration. We can do a quick approximation:
+        // Let's define an arbitrary scale factor. 
+        // A more accurate approach is to measure idle loop timing or 
+        // toggle a pin in the idle hook. 
+        // For demonstration, let's guess an "idle max" of 50,000 increments/sec
+        float idleMaxPerSec = static_cast<float>(calibratedIdleMax);
+        float usage = 100.0f * (1.0f - (deltaIdle / idleMaxPerSec));
+        if (usage < 0.0f) usage = 0.0f;
+        if (usage > 100.0f) usage = 100.0f;
+
+        cpuUsagePercent = usage;
+        Serial.print("Approx CPU Usage: ");
+        Serial.print(cpuUsagePercent, 6);
+        Serial.println(" %\n");
+#endif
+    }
+}
+
+#ifdef MEASURE_TASK_TIMES
+// Call this once in setup to enable the DWT cycle counter on Cortex-M devices:
+void enableCycleCounter() {
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+    DWT->CYCCNT = 0;
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+}
+#endif
 
 
 // ------------------------- SETUP & LOOP ------------------------------------ //
@@ -828,7 +974,9 @@ void setup() {
     CAN_Start();
     
     sysState.mutex = xSemaphoreCreateMutex();
-
+#ifdef MEASURE_TASK_TIMES
+    enableCycleCounter();
+#endif
     msgInQ = xQueueCreate(36, 8);
 #ifdef TEST_SCANKEYS
     msgOutQ = xQueueCreate(384, 8);  // Larger queue for test iterations.
@@ -836,6 +984,10 @@ void setup() {
     msgOutQ = xQueueCreate(36, 8);
 #endif
     CAN_TX_Semaphore = xSemaphoreCreateCounting(3, 3);
+
+#ifdef MEASURE_CPU_USAGE
+    calibrateIdleTicks();
+#endif
 
 #ifndef DISABLE_THREADS
     Serial.print("modulerole: ");
@@ -857,6 +1009,12 @@ void setup() {
         xTaskCreate(CAN_TX_Task, "CAN_TX_Task", 128, NULL, 1, &CAN_TX_Handle);
     }
 
+    TaskHandle_t debugHandle = NULL;
+    xTaskCreate(debugMonitorTask, "debugMonitor", 256, NULL, 1, &debugHandle);
+
+    // Start the scheduler
+    vTaskStartScheduler();
+
 #endif
 
 #ifdef TEST_SCANKEYS
@@ -871,6 +1029,12 @@ void setup() {
     Serial.print("32 iterations of scanKeysTask() took: ");
     Serial.print(elapsed);
     Serial.println(" microseconds");
+
+    // Calculate the average time per iteration and the maximum time.
+    uint32_t avgTime = elapsed / 32;
+    Serial.print("Average time per iteration: ");
+
+    
     while(1);
 #endif
 
