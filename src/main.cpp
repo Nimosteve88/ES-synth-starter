@@ -64,7 +64,7 @@ uint8_t moduleOctave = 4;         // Default octave number (can be changed at ru
 volatile int joyX12Val = 6;  // Default mid value (0 to 12)
 volatile int joyY12Val = 6;  // Default mid value (0 to 12)
 
-enum WaveformType { SAWTOOTH = 0, PIANO, TRIANGLE, SINE, SQUARE, PULSE, NOISE };
+enum WaveformType { SAWTOOTH = 0, PIANO, RISE, TRIANGLE, SINE, SQUARE, PULSE, NOISE };
 volatile WaveformType currentWaveform = SAWTOOTH;  // Default waveform
 
 //create a sine lookup table
@@ -501,6 +501,7 @@ void scanKeysTask(void * pvParameters) {
             else if (currentWaveform == PULSE) Serial.println("Pulse");
             else if (currentWaveform == NOISE) Serial.println("Noise");
             else if (currentWaveform == PIANO) Serial.println("Piano");
+            else if (currentWaveform == RISE) Serial.println("Rise");
 
         } else if (knob1SPressed && !prevKnob1SPressed){
             // Knob 1 S (!localInputs[25])
@@ -569,6 +570,7 @@ void displayUpdateTask(void * pvParameters) {
         else if (currentWaveform == PULSE) u8g2.print("Pulse");
         else if (currentWaveform == NOISE) u8g2.print("Noise");
         else if (currentWaveform == PIANO) u8g2.print("Piano");
+        else if (currentWaveform == RISE) u8g2.print("Rise");
 
 
         u8g2.setCursor(2, 30);
@@ -629,15 +631,32 @@ void decodeTask(void * pvParameters) {
             else if (localMsg[0] == 'P') {  // Press message: add the note.
                 uint8_t octave = localMsg[1];
                 uint8_t note = localMsg[2];
-                if (note < 12 && activeNoteCount < MAX_POLYPHONY) {
+                if (note < 12) {
                     uint32_t step = stepSizes[note];
-                    // Remove octave scaling here – store the raw step size.
-                    activeNotes[activeNoteCount].stepSize = step;
-                    activeNotes[activeNoteCount].phaseAcc = 0;
-                    activeNotes[activeNoteCount].elapsed = 0;
-                    activeNoteCount++;
+                    // If there's room, add a new note.
+                    if (activeNoteCount < MAX_POLYPHONY) {
+                        activeNotes[activeNoteCount].stepSize = step;
+                        activeNotes[activeNoteCount].phaseAcc = 0;
+                        activeNotes[activeNoteCount].elapsed = 0; // reset elapsed time
+                        activeNoteCount++;
+                    }
+                    else {
+                        // Voice stealing: find the oldest note and replace it.
+                        uint8_t idxToSteal = 0;
+                        uint32_t maxElapsed = activeNotes[0].elapsed;
+                        for (uint8_t i = 1; i < activeNoteCount; i++) {
+                            if (activeNotes[i].elapsed > maxElapsed) {
+                                maxElapsed = activeNotes[i].elapsed;
+                                idxToSteal = i;
+                            }
+                        }
+                        activeNotes[idxToSteal].stepSize = step;
+                        activeNotes[idxToSteal].phaseAcc = 0;
+                        activeNotes[idxToSteal].elapsed = 0;
+                    }
                 }
             }
+
             // Debug: print current polyphony
             // Serial.print("Active notes count: ");
             // Serial.println(activeNoteCount);
@@ -680,6 +699,25 @@ void CAN_TX_Task (void * pvParameters) {
         TASK_END(maxCAN_TX_Time);
     }
 }
+
+// Returns an attack envelope that linearly rises from 0 to 1 over 50ms.
+float getAttackEnvelope(uint32_t elapsed) {
+    const float attackTime = 0.3f;  // 50 ms in seconds
+    float t = elapsed / (float)SAMPLE_RATE;  // time in seconds
+    if (t >= attackTime) return 1.0f;
+    return t / attackTime;
+}
+
+// Returns a pitch factor that rises from 0.95 to 1.0 over 50ms.
+float getRisePitchFactor(uint32_t elapsed) {
+    const float attackTime = 0.05f;  // 50 ms
+    float t = elapsed / (float)SAMPLE_RATE;
+    if (t >= attackTime) return 1.0f;
+    // Linear interpolation: at t=0, factor=0.95; at t=attackTime, factor=1.0.
+    return 0.95f + 0.05f * (t / attackTime);
+}
+
+
 
 // Compute an exponential decay envelope.
 // elapsed is in samples; SAMPLE_RATE is 22050 Hz.
@@ -767,7 +805,60 @@ void sampleISR() {
         if (finalOutput < 0) finalOutput = 0;
         if (finalOutput > 255) finalOutput = 255;
         analogWrite(OUTR_PIN, finalOutput);
-    } else {
+    } else if (currentWaveform == RISE) {
+        int32_t mixSum = 0;
+        uint8_t voices = 0;
+        for (uint8_t i = 0; i < activeNoteCount; ) {
+            activeNotes[i].elapsed++;
+            // Get rising envelope and pitch factor.
+            float env = getAttackEnvelope(activeNotes[i].elapsed);
+            float pitchFactor = getRisePitchFactor(activeNotes[i].elapsed);
+            
+            // Remove note if it has decayed (or if, for some reason, envelope remains 0 for too long)
+            // (In RISE mode we expect the envelope to reach 1 quickly, so we may not remove it here.)
+            // For example, if a note remains at 0 for > 100ms, remove it.
+            if (activeNotes[i].elapsed > SAMPLE_RATE / 10 && env < 0.01f) {
+                for (uint8_t j = i; j < activeNoteCount - 1; j++) {
+                    activeNotes[j] = activeNotes[j + 1];
+                }
+                activeNoteCount--;
+                continue;
+            }
+            
+            // Apply octave scaling.
+            uint32_t noteStep = activeNotes[i].stepSize;
+            if (moduleOctave > 4) {
+                noteStep <<= (moduleOctave - 4);
+            } else if (moduleOctave < 4) {
+                noteStep >>= (4 - moduleOctave);
+            }
+            
+            // Apply the pitch rise factor to the note's step size.
+            uint32_t modifiedStep = (uint32_t)(noteStep * pitchFactor);
+            activeNotes[i].phaseAcc += modifiedStep;
+    
+            // Use a sine oscillator to generate the tone.
+            uint8_t phase = activeNotes[i].phaseAcc >> 24;
+            float angle = (phase / 256.0f) * 6.28318530718f;
+            int sample = (int)(sinf(angle) * 127.0f);
+    
+            // Apply the rising amplitude envelope.
+            sample = (int)(sample * env);
+            mixSum += sample;
+            voices++;
+            i++;
+        }
+        int normalizedSample = (voices > 0) ? mixSum / voices : 0;
+        int volume = sysState.knob3.getRotation();
+        if (volume < 0) volume = 0;
+        if (volume > 8) volume = 8;
+        int scaledSample = (normalizedSample * volume) / 8;
+        int finalOutput = scaledSample + 128;
+        if (finalOutput < 0) finalOutput = 0;
+        if (finalOutput > 255) finalOutput = 255;
+        analogWrite(OUTR_PIN, finalOutput);
+    } 
+    else {
         // Non-PIANO mode processing as before.
         int transposition = sysState.knob0.getRotation();
         uint32_t effectiveStep = currentStepSize;
