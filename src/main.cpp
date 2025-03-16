@@ -10,11 +10,13 @@
 //#define DISABLE_THREADS
 //#define DISABLE_ISRS
 //#define TEST_SCANKEYS
+//#define TEST_DECODE
+//#define TEST_CAN_TX
+//#define TEST_DISPLAYUPDATE
 
 
 
-#define MEASURE_TASK_TIMES  // Uncomment to enable task/ISR timing measurements
-#define MEASURE_CPU_USAGE   // Uncomment if you want a rough CPU usage measurement
+//#define MEASURE_TASK_TIMES  // Uncomment to enable task/ISR timing measurements
 
 #ifdef MEASURE_TASK_TIMES
 // Global variables to store worst-case (max) execution times in microseconds
@@ -36,20 +38,6 @@ volatile uint32_t maxSampleISRTime = 0;
 // If measurement is disabled, define empty macros
 #define TASK_START()   
 #define TASK_END(maxVar)
-#endif
-
-
-#ifdef MEASURE_CPU_USAGE
-// Rough CPU usage measurement via Idle Hook
-// The idea: we count how often the idle task runs in a known time window.
-volatile uint32_t idleCounter = 0;
-volatile uint32_t lastIdleCount = 0;
-volatile float cpuUsagePercent = 0.0f;
-
-// FreeRTOS will call this whenever no tasks are ready to run
-extern "C" void vApplicationIdleHook(void) {
-    idleCounter++;
-}
 #endif
 
 
@@ -935,25 +923,7 @@ extern volatile uint32_t maxCAN_TX_Time;
 extern volatile uint32_t maxSampleISRTime;
 #endif
 
-#ifdef MEASURE_CPU_USAGE
-extern volatile uint32_t idleCounter;
-extern volatile uint32_t lastIdleCount;
-extern volatile float cpuUsagePercent;
-#endif
 
-#ifdef MEASURE_CPU_USAGE
-volatile uint32_t calibratedIdleMax = 50000;  // Default value; will be updated by calibration.
-
-// Calibrate idle ticks over a 1-second period when the system is idle.
-void calibrateIdleTicks() {
-    Serial.println("Calibrating idle tick count...");
-    idleCounter = 0;                // Reset idle counter.
-    delay(1000);                    // Wait 1 second.
-    calibratedIdleMax = idleCounter;
-    Serial.print("Calibrated idle ticks per second: ");
-    Serial.println(calibratedIdleMax);
-}
-#endif
 
 void debugMonitorTask(void * pvParameters) {
     const TickType_t xFrequency = 1000 / portTICK_PERIOD_MS; // once per second
@@ -970,31 +940,6 @@ void debugMonitorTask(void * pvParameters) {
         Serial.print("maxCAN_TX_Time: "); Serial.println(maxCAN_TX_Time);
         Serial.print("maxSampleISRTime: "); Serial.println(maxSampleISRTime);
         Serial.println("----------------------------\n");
-#endif
-
-#ifdef MEASURE_CPU_USAGE
-        // We'll measure how many times the idle task was called in 1 second
-        uint32_t currentIdleCount = idleCounter;
-        uint32_t deltaIdle = currentIdleCount - lastIdleCount;
-        lastIdleCount = currentIdleCount;
-
-        // The bigger deltaIdle is, the more time we spent idle.
-        // CPU usage = (1 - (idleTicks / totalTicks)) * 100%
-        // But we don't know the absolute maximum idle ticks per second 
-        // without calibration. We can do a quick approximation:
-        // Let's define an arbitrary scale factor. 
-        // A more accurate approach is to measure idle loop timing or 
-        // toggle a pin in the idle hook. 
-        // For demonstration, let's guess an "idle max" of 50,000 increments/sec
-        float idleMaxPerSec = static_cast<float>(calibratedIdleMax);
-        float usage = 100.0f * (1.0f - (deltaIdle / idleMaxPerSec));
-        if (usage < 0.0f) usage = 0.0f;
-        if (usage > 100.0f) usage = 100.0f;
-
-        cpuUsagePercent = usage;
-        Serial.print("Approx CPU Usage: ");
-        Serial.print(cpuUsagePercent, 6);
-        Serial.println(" %\n");
 #endif
     }
 }
@@ -1076,9 +1021,7 @@ void setup() {
 #endif
     CAN_TX_Semaphore = xSemaphoreCreateCounting(3, 3);
 
-#ifdef MEASURE_CPU_USAGE
-    calibrateIdleTicks();
-#endif
+
 
 #ifndef DISABLE_THREADS
     Serial.print("modulerole: ");
@@ -1108,26 +1051,264 @@ void setup() {
 
 #endif
 
+////////////////////////////// TEST CODE ///////////////////////////////////////
 #ifdef TEST_SCANKEYS
+{
     // In test mode, execute the scanKeysTask 32 times (without starting the scheduler)
-        // Flush the transmit queue before timing.
+    // Flush the transmit queue before timing.
     xQueueReset(msgOutQ);
-    uint32_t startTime = micros();
+    uint32_t startTime_scanKeys = micros();
     for (int iter = 0; iter < 32; iter++) {
         scanKeysTask(NULL);
     }
-    uint32_t elapsed = micros() - startTime;
+    uint32_t elapsed_scanKeys = micros() - startTime_scanKeys;
     Serial.print("32 iterations of scanKeysTask() took: ");
-    Serial.print(elapsed);
+    Serial.print(elapsed_scanKeys);
     Serial.println(" microseconds");
-
-    // Calculate the average time per iteration and the maximum time.
-    uint32_t avgTime = elapsed / 32;
+    uint32_t avgTime_scanKeys = elapsed_scanKeys / 32;
     Serial.print("Average time per iteration: ");
-
+    Serial.println(avgTime_scanKeys);
     
     while(1);
+}
 #endif
+
+#ifdef TEST_DECODE
+{
+    // Preload msgInQ with 32 test messages.
+    uint8_t testMsg[8] = { 'P', 4, 0, 0, 0, 0, 0, 0 };  // A sample press message.
+    for (int i = 0; i < 32; i++) {
+        xQueueSend(msgInQ, testMsg, portMAX_DELAY);
+    }
+  
+    uint32_t startTime_decode = micros();
+    for (int iter = 0; iter < 32; iter++) {
+        uint8_t localMsg[8];
+        // Wait (blocking) for a test message.
+        if (xQueueReceive(msgInQ, localMsg, portMAX_DELAY) == pdPASS) {
+            TASK_START();  // Begin timing this decode iteration
+
+            // --- DecodeTask processing logic ---
+            if (localMsg[0] == 'R') {  // Release message: remove note.
+                uint8_t note = localMsg[2];
+                for (uint8_t i = 0; i < activeNoteCount; i++) {
+                    if (activeNotes[i].stepSize == stepSizes[note]) {
+                        // Remove note by shifting remaining notes.
+                        for (uint8_t j = i; j < activeNoteCount - 1; j++) {
+                            activeNotes[j] = activeNotes[j + 1];
+                        }
+                        activeNoteCount--;
+                        break;
+                    }
+                }
+            } else if (localMsg[0] == 'P') {  // Press message: add note.
+                uint8_t octave = localMsg[1];
+                uint8_t note = localMsg[2];
+                if (note < 12 && activeNoteCount < MAX_POLYPHONY) {
+                    uint32_t step = stepSizes[note];
+                    activeNotes[activeNoteCount].stepSize = step;
+                    activeNotes[activeNoteCount].phaseAcc = 0;
+                    activeNotes[activeNoteCount].elapsed = 0;
+                    activeNoteCount++;
+                }
+            }
+            // Update RX_Message for debug (protected by mutex)
+            xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+            memcpy(sysState.RX_Message, localMsg, sizeof(sysState.RX_Message));
+            xSemaphoreGive(sysState.mutex);
+            // --- End decodeTask processing ---
+
+            TASK_END(maxDecodeTime);  // End timing and update maxDecodeTime
+        }
+    }
+    uint32_t elapsed_decode = micros() - startTime_decode;
+    uint32_t avgTime_decode = elapsed_decode / 32;
+    Serial.print("32 iterations of decodeTask took: ");
+    Serial.print(elapsed_decode);
+    Serial.println(" microseconds");
+    Serial.print("Average time per iteration: ");
+    Serial.print(avgTime_decode);
+    Serial.println(" microseconds");
+  
+    // Assuming that decodeTask events occur roughly every 100ms, compute CPU load:
+    float cpuLoad_decode = (avgTime_decode / 100000.0f) * 100.0f;
+    Serial.print("DecodeTask CPU Load: ");
+    Serial.print(cpuLoad_decode, 2);
+    Serial.println(" %");
+  
+    while(1);
+}
+#endif
+
+#ifdef TEST_CAN_TX
+{
+    // Preload msgOutQ with 32 test messages.
+    for (int i = 0; i < 32; i++) {
+        uint8_t testMsg[8] = { 'P', 4, (uint8_t)i, 0, 0, 0, 0, 0 };
+        xQueueSend(msgOutQ, testMsg, portMAX_DELAY);
+    }
+  
+    uint32_t startTime_canTX = micros();
+    for (int i = 0; i < 32; i++) {
+        TASK_START();  // Begin timing this iteration
+        uint8_t msgOut[8];
+        // Wait (blocking) for a test message from msgOutQ.
+        xQueueReceive(msgOutQ, msgOut, portMAX_DELAY);
+      
+        // Simulate CAN_TX call. In real operation, you would call:
+        // xSemaphoreTake(CAN_TX_Semaphore, portMAX_DELAY);
+        // CAN_TX(0x123, msgOut);
+        // For test mode, you might simply simulate a minimal delay.
+      
+        TASK_END(maxCAN_TX_Time);  // End timing this iteration and update maxCAN_TX_Time
+    }
+    uint32_t elapsed_canTX = micros() - startTime_canTX;
+    uint32_t avgTime_canTX = elapsed_canTX / 32;
+    Serial.print("32 iterations of CAN_TX_Task took: ");
+    Serial.print(elapsed_canTX);
+    Serial.println(" microseconds");
+    Serial.print("Average time per iteration: ");
+    Serial.print(avgTime_canTX);
+    Serial.println(" microseconds");
+  
+    // Assuming a period of 20ms (20000 us) for CAN messages:
+    float cpuLoad_canTX = (avgTime_canTX / 20000.0f) * 100.0f;
+    Serial.print("CAN_TX_Task CPU Load: ");
+    Serial.print(cpuLoad_canTX, 2);
+    Serial.println(" %");
+  
+    while(1);
+}
+#endif
+
+#ifdef TEST_DISPLAYUPDATE
+{
+    // Execute one iteration of displayUpdateTask (simulate the task code without the loop)
+    TASK_START();
+    digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+
+    // Update joystick values
+    int rawJoyX = analogRead(JOYX_PIN);
+    int rawJoyY = analogRead(JOYY_PIN);
+    joyX12Val = map(rawJoyX, 800, 119, 0, 12);
+    joyY12Val = map(rawJoyY, 800, 119, 0, 12);
+
+    // Read knob value under mutex
+    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+    int rotationCopy = sysState.knob3.getRotation();
+    xSemaphoreGive(sysState.mutex);
+
+    // Prepare the display buffer
+    u8g2.clearBuffer();
+    u8g2.setFont(u8g2_font_ncenB08_tr);
+    u8g2.drawStr(2, 10, moduleRole == SENDER ? "SENDER" : "RECEIVER");
+    u8g2.setCursor(75, 10);
+    u8g2.print("(");
+    u8g2.print(joyX12Val);
+    u8g2.print(",");
+    u8g2.print(joyY12Val);
+    u8g2.print(")");
+
+    // Display current waveform
+    u8g2.setCursor(2, 20);
+    if (currentWaveform == SAWTOOTH) u8g2.print("Sawtooth");
+    else if (currentWaveform == TRIANGLE) u8g2.print("Triangle");
+    else if (currentWaveform == SINE) u8g2.print("Sine");
+    else if (currentWaveform == SQUARE) u8g2.print("Square");
+    else if (currentWaveform == PULSE) u8g2.print("Pulse");
+    else if (currentWaveform == NOISE) u8g2.print("Noise");
+    else if (currentWaveform == PIANO) u8g2.print("Piano");
+
+    // Display volume and pitch
+    u8g2.setCursor(2, 30);
+    u8g2.print("Volume: ");
+    u8g2.print(rotationCopy);
+    u8g2.setCursor(66, 20);
+    u8g2.print("Pitch: ");
+    u8g2.print(moduleOctave);
+
+    // Display last received CAN message
+    xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+    u8g2.setCursor(66, 30);
+    u8g2.print(sysState.RX_Message[0] == 'P' ? "P" : "R");
+    u8g2.print(sysState.RX_Message[1]);
+    u8g2.print(sysState.RX_Message[2]);
+    xSemaphoreGive(sysState.mutex);
+
+    u8g2.sendBuffer();
+    digitalToggle(LED_BUILTIN);
+    TASK_END(maxDisplayUpdateTime);
+
+    // Now perform 32 iterations of the same display update code:
+    uint32_t startTime_display = micros();
+    for (int iter = 0; iter < 32; iter++) {
+         TASK_START();
+         digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+
+         int rawJoyX = analogRead(JOYX_PIN);
+         int rawJoyY = analogRead(JOYY_PIN);
+         joyX12Val = map(rawJoyX, 800, 119, 0, 12);
+         joyY12Val = map(rawJoyY, 800, 119, 0, 12);
+
+         xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+         int rotationCopy = sysState.knob3.getRotation();
+         xSemaphoreGive(sysState.mutex);
+
+         u8g2.clearBuffer();
+         u8g2.setFont(u8g2_font_ncenB08_tr);
+         u8g2.drawStr(2, 10, moduleRole == SENDER ? "SENDER" : "RECEIVER");
+         u8g2.setCursor(75, 10);
+         u8g2.print("(");
+         u8g2.print(joyX12Val);
+         u8g2.print(",");
+         u8g2.print(joyY12Val);
+         u8g2.print(")");
+
+         u8g2.setCursor(2, 20);
+         if (currentWaveform == SAWTOOTH) u8g2.print("Sawtooth");
+         else if (currentWaveform == TRIANGLE) u8g2.print("Triangle");
+         else if (currentWaveform == SINE) u8g2.print("Sine");
+         else if (currentWaveform == SQUARE) u8g2.print("Square");
+         else if (currentWaveform == PULSE) u8g2.print("Pulse");
+         else if (currentWaveform == NOISE) u8g2.print("Noise");
+         else if (currentWaveform == PIANO) u8g2.print("Piano");
+
+         u8g2.setCursor(2, 30);
+         u8g2.print("Volume: ");
+         u8g2.print(rotationCopy);
+         u8g2.setCursor(66, 20);
+         u8g2.print("Pitch: ");
+         u8g2.print(moduleOctave);
+
+         xSemaphoreTake(sysState.mutex, portMAX_DELAY);
+         u8g2.setCursor(66, 30);
+         u8g2.print(sysState.RX_Message[0] == 'P' ? "P" : "R");
+         u8g2.print(sysState.RX_Message[1]);
+         u8g2.print(sysState.RX_Message[2]);
+         xSemaphoreGive(sysState.mutex);
+
+         u8g2.sendBuffer();
+         digitalToggle(LED_BUILTIN);
+         TASK_END(maxDisplayUpdateTime);
+    }
+    uint32_t elapsed_display = micros() - startTime_display;
+    uint32_t avgTime_display = elapsed_display / 32;
+    Serial.print("32 iterations of displayUpdateTask took: ");
+    Serial.print(elapsed_display);
+    Serial.println(" microseconds");
+    Serial.print("Average time per iteration: ");
+    Serial.print(avgTime_display);
+    Serial.println(" microseconds");
+    float cpuLoad_display = (avgTime_display / 100000.0f) * 100.0f; // Assuming period of 100ms
+    Serial.print("displayUpdateTask CPU Load: ");
+    Serial.print(cpuLoad_display, 2);
+    Serial.println(" %");
+    while(1);
+}
+#endif
+
+
+////////////////////////////// END TEST CODE ///////////////////////////////////////
 
 #ifndef DISABLE_THREADS
     // Start the FreeRTOS scheduler; this should never return in normal operation.

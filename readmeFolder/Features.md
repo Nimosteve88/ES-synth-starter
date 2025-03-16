@@ -2,6 +2,17 @@
 
 This document details the features implemented in the ES-Synth Keyboard, describing both the hardware interactions and the underlying algorithms.
 
+## Contents
+- [ES-Synth Keyboard Features](#es-synth-keyboard-features)
+- [1. Sound Generation](#1-sound-generation)
+  - [Waveform Modes](#waveform-modes)
+- [2. Key Matrix Scanning](#2-key-matrix-scanning)
+- [3. Control Inputs](#3-control-inputs)
+- [4. Display and Communication](#4-display-and-communication)
+- [5. Real-Time Task Management](#5-real-time-task-management)
+- [Future Enhancements](#future-enhancements)
+
+
 ## 1. Sound Generation
 
 ### Waveform Modes

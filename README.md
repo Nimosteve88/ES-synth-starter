@@ -1,5 +1,11 @@
 # ES-Synth Keyboard
 
+- [Overview](#overview)
+- [Keyboard Controls](#keyboard-controls)
+- [What the Keyboard Does](#what-the-keyboard-does)
+- [Additional Resources (Including Report)](#additional-resources)
+- [Contributors](#contributors)
+
 ## Overview
 
 The ES-Synth Keyboard is a versatile synthesizer that supports multiple sound modes. It uses a variety of digital synthesis techniques—including numerically controlled oscillators and phase accumulation—to generate different waveforms such as sawtooth, sine, triangle, square, and more. The algorithms for these sound modes are described in detail in a separate documentation.
@@ -39,8 +45,8 @@ The ES-Synth Keyboard is a versatile synthesizer that supports multiple sound mo
 
 ## Additional Resources
 
-- **Lab Report:** [Report README](doc/Report.md)  
-- **Feature Details:** [Features README](doc/Features.md)
+- **Lab Report:** [Report README](readmeFolder/Report.md)  
+- **Feature Details:** [Features README](readmeFolder/Features.md)
 
 
 ## Contributors
