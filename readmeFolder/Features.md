@@ -6,6 +6,8 @@ This document details the features implemented in the ES-Synth Keyboard, describ
 - [ES-Synth Keyboard Features](#es-synth-keyboard-features)
 - [1. Sound Generation](#1-sound-generation)
   - [Waveform Modes](#waveform-modes)
+- [1.5 Polyphony Implementation](#15-polyphony-implementation)
+- [1.6 Transposition and Octave Control](#16-transposition-and-octave-control)
 - [2. Key Matrix Scanning](#2-key-matrix-scanning)
 - [3. Control Inputs](#3-control-inputs)
 - [4. Display and Communication](#4-display-and-communication)
@@ -52,6 +54,42 @@ This document details the features implemented in the ES-Synth Keyboard, describ
   - **Envelope:** Instead of decaying, a rising envelope function (such as an exponential approach to a ceiling) is applied so that the note starts soft and grows to its full amplitude.  
     *Formula example:* `env = 1 - exp(-k * elapsedTime)` where `k` controls the speed of rise.
   - **Pitch Factor:** A secondary modulation factor adjusts the pitch over time, defined by a custom function (`getRisePitchFactor`) to create evolving tonal characteristics. This mode does not remove notes quickly since the envelope is expected to reach its peak value and sustain the tone.
+
+## 1.5 Polyphony Implementation
+
+In our implementation (main.cpp), polyphony is achieved by maintaining a pool of active voices that can overlap. When a key is pressed, the system allocates a voice from the available pool and assigns it the corresponding note parameters, including waveform type, frequency, and envelope settings. The code manages voice allocation dynamically, allowing for multiple simultaneous notes. When the note's envelope decays past a threshold or the key is released, the corresponding voice is deactivated and returned to the pool. Additionally, if the number of simultaneous note requests exceeds the available voices, a simple voice-stealing strategy is employed to ensure continuous sound generation without interruption.
+
+## 1.6 Transposition and Octave Control
+
+Transposition and octave control are handled in main.cpp by combining adjustments from both the joystick and Knob 0 for fine and coarse transposition shifts, along with octave selection via Knob 2.
+
+### Transposition (Knob 0 & Joystick)
+The base frequency of a note (f_base) is adjusted based on a transposition value, T, which is the sum of the coarse adjustment from Knob 0 and a fine, fractional adjustment derived from the joystick input. The transposed frequency is calculated using the formula:
+   
+   f_transposed = f_base * 2^(T/12)
+
+Where:
+- T = knob0_value + (joystick_offset * fineTuneFactor)
+- knob0_value maps to integer semitone shifts.
+- joystick_offset provides a fractional enhancement for smoother pitch modulation.
+- fineTuneFactor scales the joystick's contribution to semitone shifts.
+
+### Octave Control (Knob 2)
+Octave control scales the transposed frequency by a power-of-two factor, effectively doubling or halving the frequency for each octave change. This is given by:
+
+   f_octave = f_transposed * 2^(N - N_ref)
+
+Where:
+- N is the octave selected via Knob 2.
+- N_ref is the reference or middle octave.
+
+### Final Frequency Calculation
+Combining both adjustments, the final frequency for a note is computed as:
+
+   f_final = f_base * 2^((knob0_value + (joystick_offset * fineTuneFactor)) / 12) * 2^(N - N_ref)
+
+This formula allows for seamless integration of transposition and octave adjustments, ensuring that pitch modifications remain musically accurate and responsive to user input.
+
 
 ## 2. Key Matrix Scanning
 
