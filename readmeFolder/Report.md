@@ -3,6 +3,7 @@ This document presents the design, implementation, and analysis of a music synth
 
 The following sections address requirements (14)–(19) from the coursework specification.
 
+Through these analyses, the report ensures that the synthesizer meets real-time constraints while efficiently managing processing resources. Additionally, advanced features and optimizations beyond the core requirements are discussed to highlight the system’s scalability and robustness.
 
 ## Contents
 - [1. Introduction](#1-introduction)
@@ -28,79 +29,55 @@ The following sections address requirements (14)–(19) from the coursework spec
 # 2. Identification of Tasks (Requirement 14)
 The system performs the following concurrent tasks and interrupts:
 
-### scanKeysTask (FreeRTOS Task, Priority 2)
-**Purpose:** Periodically scan an 8×4 matrix of keys and knobs (~every 20 ms).  
-**Implementation:** Created with `xTaskCreate()`.
+## 📌 System Tasks Overview
 
-### displayUpdateTask (FreeRTOS Task, Priority 1)
-**Purpose:** Refresh the OLED display every 100 ms, toggle an LED, and read joystick analog inputs.  
-**Implementation:** Created with `xTaskCreate()`.
+| **Task/ISR Name**       | **Type**                     | **Purpose** | **Implementation** |
+|-------------------------|-----------------------------|-------------|--------------------|
+| **`scanKeysTask`**      | FreeRTOS Task (**Priority 2**) | Scans an **8×4 matrix** of keys and knobs every **~20ms**. | Created with `xTaskCreate()`. |
+| **`displayUpdateTask`** | FreeRTOS Task (**Priority 1**) | Updates the **OLED display (100ms)**, toggles an LED, and reads joystick inputs. | Created with `xTaskCreate()`. |
+| **`decodeTask`**        | FreeRTOS Task (**Priority 1**) | Waits for **incoming CAN messages** in `msgInQ` and processes note events for polyphony. | Created with `xTaskCreate()`. |
+| **`CAN_TX_Task`**       | FreeRTOS Task (**Priority 1**) | In **SENDER mode**, waits for outgoing messages in `msgOutQ` and sends them via **CAN bus**. | Created with `xTaskCreate()`. **Suspended if `moduleRole` is RECEIVER**. |
+| **`sampleISR`**         | **Timer Interrupt (~22,050 Hz)** | Generates **real-time audio samples (synthesis)**. | Attached to a hardware timer (`sampleTimer.attachInterrupt(sampleISR)`). |
+| **`CAN_RX_ISR`**        | **CAN Receive Interrupt** | Triggers when a **CAN message is received** and enqueues it in `msgInQ`. | Registered with `CAN_RegisterRX_ISR(CAN_RX_ISR)`. |
+| **`CAN_TX_ISR`**        | **CAN Transmit Interrupt** | Signals when a **CAN transmission buffer is free** and releases `CAN_TX_Semaphore`. | Registered with `CAN_RegisterTX_ISR(CAN_TX_ISR)`. |
+| **`debugMonitorTask`**  | FreeRTOS Task (**Priority 1**) | Periodically **prints execution times of tasks/ISRs and CPU usage**. | Created with `xTaskCreate()`. |
 
-### decodeTask (FreeRTOS Task, Priority 1)
-**Purpose:** Wait for incoming CAN messages in `msgInQ`, then handle note press/release events for polyphony.  
-**Implementation:** Created with `xTaskCreate()`.
-
-### CAN_TX_Task (FreeRTOS Task, Priority 1)
-**Purpose:** In sender mode, waits for outgoing messages in `msgOutQ` and transmits them via CAN.  
-**Implementation:** Created with `xTaskCreate()`. Suspended if `moduleRole` is receiver.
-
-### sampleISR (Timer Interrupt at ~22,050 Hz)
-**Purpose:** Generate audio samples in real time (synthesis).  
-**Implementation:** Attached to a hardware timer (`sampleTimer.attachInterrupt(sampleISR)`).
-
-### CAN_RX_ISR (CAN Receive Interrupt)
-**Purpose:** Fires upon incoming CAN messages; enqueues them into `msgInQ`.  
-**Implementation:** Registered with `CAN_RegisterRX_ISR(CAN_RX_ISR)`.
-
-### CAN_TX_ISR (CAN Transmit Interrupt)
-**Purpose:** Signals that a CAN transmission buffer is free; releases a semaphore `CAN_TX_Semaphore`.  
-**Implementation:** Registered with `CAN_RegisterTX_ISR(CAN_TX_ISR)`.
-
-### debugMonitorTask (FreeRTOS Task, Priority 1)
-**Purpose:** Periodically prints maximum execution times of tasks/ISRs and approximate CPU usage.  
-**Implementation:** Created with `xTaskCreate()`.
 
 Each of these tasks or ISRs runs concurrently, either by fixed-period scheduling (FreeRTOS) or by interrupt triggers.
 
+In FreeRTOS, task priorities are assigned as integer values, where higher numbers indicate higher priority. A higher priority task will preempt a lower priority task if both are ready to run. Tasks that are higher priority are determined based on their operating frequency. For instance, **scanKeysTask (Priority 2)** has the highest priority because it runs more frequently (every 20ms) than other tasks and is time-sensitive, since keyboard scanning needs to be in real-time. A detailed evaluation on whether or not these tasks meets their deadlines will be covered later in the Rate Monotonic Scheduling Analysis. 
+
 # 3. Task Characterization (Requirement 15)
+The minimum initiation intervals and maximum execution times are critical in ensuring that the system meets its real-time scheduling constraints. The minimum initiation intervals define how frequently tasks must execute, while the maximum execution times indicate how long tasks take under worst-case conditions. The scheduling system must ensure that no task exceeds its allocated execution time, as this would cause delays or missed deadlines.
 
 ## 3.1 Theoretical Minimum Initiation Intervals
-- **scanKeysTask:**  
-  Period: 20 ms (minimum initiation interval).
-
-- **displayUpdateTask:**  
-  Period: 100 ms.
-
-- **decodeTask:**  
-  Event-driven by queue arrivals. In principle, it could be triggered any time a CAN message arrives. The minimum gap between triggers depends on CAN bus traffic.
-
-- **CAN_TX_Task:**  
-  Event-driven by queue `msgOutQ`. If messages arrive back-to-back, it could run repeatedly with minimal gaps, limited by CAN bus throughput and the `CAN_TX_Semaphore`.
-
-- **sampleISR:**  
-  Period: ~45 µs (22,050 Hz).
-
-- **CAN_RX_ISR:**  
-  Event-driven by CAN hardware receiving frames. Minimum inter-arrival time depends on bus traffic.
-
-- **CAN_TX_ISR:**  
-  Event-driven by hardware finishing a transmit buffer.
-
-- **debugMonitorTask:**  
-  Period: 1 second (to print debug info).
+| **Task Name**       | **Initiation Type**     | **Period / Trigger** |
+|---------------------|------------------------|----------------------|
+| **`scanKeysTask`**  | Periodic | **20ms** | 
+| **`displayUpdateTask`** | Periodic | **100ms** |
+| **`decodeTask`** | Event-driven | **On CAN message arrival** | 
+| **`CAN_TX_Task`** | Event-driven | **On `msgOutQ` event** |
+| **`sampleISR`** | Periodic | **~45µs (22,050 Hz)** |
+| **`CAN_RX_ISR`** | Event-driven | **On CAN hardware event** | 
+| **`CAN_TX_ISR`** | Event-driven | **On CAN transmission complete** |
+| **`debugMonitorTask`** | Periodic | **1 second** | 
 
 ## 3.2 Measured Maximum Execution Times
 By enabling the timing macros in our code (`#define MEASURE_TASK_TIMES`), we measured the following worst-case execution times (in microseconds) as reported by debugMonitorTask:
 
-- scanKeysTask: ~21,049 µs (21 ms)
-- displayUpdateTask: ~121,585 µs (121.6 ms)
-- decodeTask: ~36 µs
-- CAN_TX_Task: ~36 µs
-- sampleISR: ~39 µs
+| **Task Name**        | **Measured Execution Time** |  **Significance** |
+|---------------------|----------------------------|----------------------------|
+| **`scanKeysTask`** | **21,049 µs (21.0 ms)** | Just meets its deadline but is very close. |
+| **`displayUpdateTask`** | **121,585 µs (121.6 ms)** | Exceeds its deadline. |
+| **`decodeTask`** | **36 µs** | Meets deadline, ensuring smooth audio synthesis. |
+| **`CAN_TX_Task`** | **36 µs** | Can execute quickly when needed. |
+| **`sampleISR`** | **39 µs** | Can execute quickly when needed. |
 
 *Note:* Some tasks, like `decodeTask`, only occasionally run, so the max times are relatively small. Meanwhile, `displayUpdateTask` can be large because of I2C display updates and printing.
 
+Further elaborating on the measured data above, it can be seen that **scanKeysTask** barely meets its deadline, which means any additional computation could cause missed key presses. However, this has not been an issue under normal running conditions, which is mostly due to the fact that it has the highest priority. Nevertheless, the reliability of the system could be further improved by optimizing the execution time of **scanKeyTask** to stay well below 20ms. 
 
+The main issue presented in this section is how the measured execution time in **displayUpdateTask** is greater than its minimum initiation interval. 
 
 # 4. Critical Instant Analysis (Requirement 16)
 
