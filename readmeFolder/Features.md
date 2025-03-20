@@ -14,10 +14,31 @@ This document details the advanced features implemented in the ES-Synth Keyboard
 - [5. Real-Time Task Management](#5-real-time-task-management)
 - [Future Enhancements](#future-enhancements)
 
+## 1. Control Inputs
+The following list presents all the control inputs implemented in the system. 
 
-## 1. Sound Generation
+- **Knobs and Joystick:**
+  - **Knob 0 Rotation:**  
+    Adjusts pitch transposition in non-piano modes, where an upward rotation increases the pitch and a downward rotation decreases it.
+  - **Knob 0S (Button):**  
+    Cycles through the available waveform modes, switching between waveforms such as Sawtooth, Triangle, Sine, Square, Pulse, Noise, Piano, and Rise.
+  - **Knob 1S (Button):**  
+    Toggles the module role between SENDER and RECEIVER, affecting how the system communicates with other modules via CAN bus.
+  - **Knob 2 Rotation:**  
+    Sets the active octave number, thereby affecting the overall pitch scaling.
+  - **Knob 2S (Button):**  
+    Currently prints a debug message ("Knob 2S pressed") and is reserved for future functionality.
+  - **Knob 3 Rotation:**  
+    Controls output volume and is also used to adjust the pulse duty cycle when in Pulse waveform mode.
+  - **Knob 3S (Button):**  
+    Currently prints a debug message ("Knob 3S pressed") and is reserved for potential enhancements.
+  - **Joystick and Joystick S (Button):**  
+    The analog inputs (X and Y) from the joystick modulate effect parameters (e.g., pitch modulation in non-piano mode), while the joystick button currently outputs a debug message.
 
-### Waveform Modes
+## 2. Sound Generation
+
+## 2.1 Waveform Modes
+Different waveforms are customized to produce different sound effects. These configurations can be selected by Knob 0. 
 
 - **Sawtooth:**  
   Uses a linear phase accumulator to generate a continuously increasing ramp that resets at its maximum value. The basic formula resembles:  
@@ -55,11 +76,11 @@ This document details the advanced features implemented in the ES-Synth Keyboard
     *Formula example:* `env = 1 - exp(-k * elapsedTime)` where `k` controls the speed of rise.
   - **Pitch Factor:** A secondary modulation factor adjusts the pitch over time, defined by a custom function (`getRisePitchFactor`) to create evolving tonal characteristics. This mode does not remove notes quickly since the envelope is expected to reach its peak value and sustain the tone.
 
-## 1.5 Polyphony Implementation
+## 2.2 Polyphony Implementation
 
 In our implementation (main.cpp), polyphony is achieved by maintaining a pool of active voices that can overlap. When a key is pressed, the system allocates a voice from the available pool and assigns it the corresponding note parameters, including waveform type, frequency, and envelope settings. The code manages voice allocation dynamically, allowing for multiple simultaneous notes. When the note's envelope decays past a threshold or the key is released, the corresponding voice is deactivated and returned to the pool. Additionally, if the number of simultaneous note requests exceeds the available voices, a simple voice-stealing strategy is employed to ensure continuous sound generation without interruption.
 
-## 1.6 Transposition and Octave Control
+## 2.3 Transposition and Octave Control
 
 Transposition and octave control are handled in main.cpp by combining adjustments from both the joystick and Knob 0 for fine and coarse transposition shifts, along with octave selection via Knob 2.
 
@@ -91,33 +112,13 @@ Combining both adjustments, the final frequency for a note is computed as:
 This formula allows for seamless integration of transposition and octave adjustments, ensuring that pitch modifications remain musically accurate and responsive to user input.
 
 
-## 2. Key Matrix Scanning
+## 3. Key Matrix Scanning
 
 - **8x4 Key Matrix:**  
   A dedicated key matrix is scanned to detect key presses (notes). This enables real-time generation and removal of notes based on key activity.
 
 - **Note Mapping:**  
   Each key (0–11) maps to a specific frequency by selecting a corresponding step size within the waveform generation algorithm.
-
-## 3. Control Inputs
-
-- **Knobs and Joystick:**
-  - **Knob 0 Rotation:**  
-    Adjusts pitch transposition in non-piano modes, where an upward rotation increases the pitch and a downward rotation decreases it.
-  - **Knob 0S (Button):**  
-    Cycles through the available waveform modes, switching between waveforms such as Sawtooth, Triangle, Sine, Square, Pulse, Noise, Piano, and Rise.
-  - **Knob 1S (Button):**  
-    Toggles the module role between SENDER and RECEIVER, affecting how the system communicates with other modules via CAN bus.
-  - **Knob 2 Rotation:**  
-    Sets the active octave number, thereby affecting the overall pitch scaling.
-  - **Knob 2S (Button):**  
-    Currently prints a debug message ("Knob 2S pressed") and is reserved for future functionality.
-  - **Knob 3 Rotation:**  
-    Controls output volume and is also used to adjust the pulse duty cycle when in Pulse waveform mode.
-  - **Knob 3S (Button):**  
-    Currently prints a debug message ("Knob 3S pressed") and is reserved for potential enhancements.
-  - **Joystick and Joystick S (Button):**  
-    The analog inputs (X and Y) from the joystick modulate effect parameters (e.g., pitch modulation in non-piano mode), while the joystick button currently outputs a debug message.
 
 ## 4. Display and Communication
 
