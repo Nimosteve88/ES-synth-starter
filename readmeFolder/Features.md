@@ -198,9 +198,10 @@ However, when the formula was initially implemented, the timing constraints were
   else if (localInputs[23]){
             Serial.println("West Detect Initiated");
         }
-        else if (localInputs[27]){
-            Serial.println("East Detect Initiated");
-        }
+        
+  else if (localInputs[27]){
+      Serial.println("East Detect Initiated");
+  }
   ```
 
 ## Future Enhancements

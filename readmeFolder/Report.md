@@ -12,7 +12,7 @@ Through these analyses, the report ensures that the synthesizer meets real-time 
   - [displayUpdateTask (FreeRTOS Task, Priority 1)](#displayupdatetask-freertos-task-priority-1)
   - [decodeTask (FreeRTOS Task, Priority 1)](#decodetask-freertos-task-priority-1)
   - [CAN_TX_Task (FreeRTOS Task, Priority 1)](#can_tx_task-freertos-task-priority-1)
-  - [sampleISR (Timer Interrupt)](#sampleisr-timer-interrupt )
+  - [sampleISR (Timer Interrupt)](#sampleisr-timer-interrupt)
   - [CAN_RX_ISR (CAN Receive Interrupt)](#can_rx_isr-can-receive-interrupt)
   - [CAN_TX_ISR (CAN Transmit Interrupt)](#can_tx_isr-can-transmit-interrupt)
   - [debugMonitorTask (FreeRTOS Task, Priority 1)](#debugmonitortask-freertos-task-priority-1)
@@ -23,7 +23,6 @@ Through these analyses, the report ensures that the synthesizer meets real-time 
 - [5. CPU Utilisation (Requirement 17)](#5-cpu-utilisation-requirement-17)
 - [6. Shared Data Structures & Synchronisation (Requirement 18)](#6-shared-data-structures--synchronisation-requirement-18)
 - [7. Inter-Task Blocking & Deadlock Analysis (Requirement 19)](#7-inter-task-blocking--deadlock-analysis-requirement-19)
-
 
 
 # 2. Identification of Tasks (Requirement 14)
@@ -75,6 +74,32 @@ By enabling the timing macros in our code (`#define MEASURE_TASK_TIMES`), we mea
 
 *Note:* Some tasks, like `decodeTask`, only occasionally run, so the max times are relatively small. Meanwhile, `displayUpdateTask` can be large because of I2C display updates and printing.
 
+Exemplar code snippet used to achieve execution time:
+```cpp
+// ...existing code...
+
+void scanKeysTask(void *params) {
+    while(true) {
+#ifdef MEASURE_TASK_TIMES
+        unsigned long startTime = micros();
+#endif
+
+        // ...existing code for scanning keys...
+
+#ifdef MEASURE_TASK_TIMES
+        unsigned long endTime = micros();
+        Serial.print("scanKeysTask execution time: ");
+        Serial.print(endTime - startTime);
+        Serial.println(" µs");
+#endif
+        vTaskDelay(20 / portTICK_PERIOD_MS);
+    }
+}
+
+// ...existing code...
+
+```
+
 Further elaborating on the measured data above, it can be seen that **scanKeysTask** barely meets its deadline, which means any additional computation could cause missed key presses. However, this has not been an issue under normal running conditions, which is mostly due to the fact that it has the highest priority. Nevertheless, the reliability of the system could be further improved by optimizing the execution time of **scanKeyTask** to stay well below 20ms. 
 
 The main issue presented in this section is how the measured execution time in **displayUpdateTask** is greater than its minimum initiation interval. 
@@ -102,7 +127,7 @@ A worst-case response time analysis helps determine **if tasks meet their deadli
 ### **📌 Step 1: Check `sampleISR` Deadline**
 Since `sampleISR` runs at a **fixed audio sampling rate (~22,050 Hz)**, it must complete execution within **45 µs**.
 
-✅ **Meets deadline** because the maximum execution time is less than the deadline $(39 \text{ µs} \leq 45 \text{ µs} \)$.
+✅ **Meets deadline** because the maximum execution time is less than the deadline $(39 \text{ µs} \leq 45 \text{ µs})$.
 
 ### **📌 Step 2: Check `scanKeysTask` Deadline**
 `scanKeysTask` runs every **20 ms (20,000 µs)** but could be delayed by one **`sampleISR` execution** in the worst case:
@@ -125,7 +150,7 @@ Similarly, 'displayUpdateTask' misses its theoretical deadline, but since displa
 
 Overall, the system remains robust, functional, and real-time compliant despite theoretical RMS deadline violations. Even under worst-case execution conditions, no task failures or noticeable performance degradation occur, making this implementation suitable for real-time synthesizer applications while leaving room for further optimizations. 
 
-# **5. CPU Utilization (Requirement 17)**
+# 5. CPU Utilization (Requirement 17)
 
 To confirm that **CPU load remains within acceptable limits**, we measured the execution time of each periodic task using the `micros()` function. The CPU utilization is computed using:
 
@@ -135,7 +160,9 @@ where:
 - $C_i$ = Execution time of task $i$
 - $T_i$ = Task period
 
-## **5.1 CPU Utilization Measurements**
+
+
+## 5.1 CPU Utilization Measurements
 | **Task Name**          | **Execution Time ($C_i$)** | **Period ($T_i$)** | **CPU Load ($C_i / T_i * 100$)** |
 |-----------------------|----------------|--------------|------------------|
 | **`scanKeysTask`** | **33.5 µs** | **20,000 µs** | **0.1675%** |
@@ -143,7 +170,7 @@ where:
 | **`CAN_TX_Task`** | **4.125 µs** | **20,000 µs** | **0.02%** |
 | **`displayUpdateTask`** | **18,260 µs** | **100,000 µs** | **18.26%** |
 
-## **5.2 Total CPU Utilization**
+## 5.2 Total CPU Utilization
 $U_{\text{total}}$ = $0.1675$% + $0.01$% + $0.02$% + $18.26$% = $18.46$%
 
 Overall, the total measured CPU utilization is approximately 18.46%, indicating that the system operates well within its processing limits. This means there is significant headroom for additional computations or future enhancements, such as adding new features, increasing sampling rates, or incorporating more complex audio synthesis algorithms, without overloading the processor.
