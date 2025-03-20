@@ -1,6 +1,6 @@
-# ES-Synth Keyboard Features
+# ES-Synth Keyboard Advanced Features
 
-This document details the features implemented in the ES-Synth Keyboard, describing both the hardware interactions and the underlying algorithms.
+This document details the advanced features implemented in the ES-Synth Keyboard, describing both the hardware interactions and the underlying algorithms.
 
 ## Contents
 - [ES-Synth Keyboard Features](#es-synth-keyboard-features)
