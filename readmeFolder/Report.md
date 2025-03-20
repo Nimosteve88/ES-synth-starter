@@ -27,7 +27,7 @@ Through these analyses, the report ensures that the synthesizer meets real-time 
 
 
 # 2. Identification of Tasks (Requirement 14)
-The system performs the following concurrent tasks and interrupts:
+The table below presents the concurrent tasks and interrupts in the system. Note that the FreeRTOS tasks are classified as threads. 
 
 ## 📌 System Tasks Overview
 
