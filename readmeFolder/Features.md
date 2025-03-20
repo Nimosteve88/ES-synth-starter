@@ -78,6 +78,65 @@ Different waveforms are customized to produce different sound effects. These con
 ## 2.2 Polyphony Implementation
 
 In our implementation (main.cpp), polyphony is achieved by maintaining a pool of active voices that can overlap. When a key is pressed, the system allocates a voice from the available pool and assigns it the corresponding note parameters, including waveform type, frequency, and envelope settings. The code manages voice allocation dynamically, allowing for multiple simultaneous notes. When the note's envelope decays past a threshold or the key is released, the corresponding voice is deactivated and returned to the pool. Additionally, if the number of simultaneous note requests exceeds the available voices, a simple voice-stealing strategy is employed to ensure continuous sound generation without interruption.
+```
+struct ActiveNote {
+    uint32_t stepSize;
+    uint32_t phaseAcc;
+    uint32_t elapsed;
+};
+
+#define MAX_POLYPHONY 12  // Maximum number of simultaneous notes
+
+ActiveNote activeNotes[MAX_POLYPHONY];
+uint8_t activeNoteCount = 0;
+```
+
+The function is implemented using the following logic:
+```
+if (xQueueReceive(msgInQ, localMsg, portMAX_DELAY) == pdPASS) {
+            TASK_START();
+            if (localMsg[0] == 'R') {  // Release message: remove the note.
+                uint8_t note = localMsg[2];
+                for (uint8_t i = 0; i < activeNoteCount; i++) {
+                    if (activeNotes[i].stepSize == stepSizes[note]) {
+                        // Remove the note by shifting the remaining notes
+                        for (uint8_t j = i; j < activeNoteCount - 1; j++) {
+                            activeNotes[j] = activeNotes[j + 1];
+                        }
+                        activeNoteCount--;
+                        break;
+                    }
+                }
+            }
+            else if (localMsg[0] == 'P') {  // Press message: add the note.
+                uint8_t octave = localMsg[1];
+                uint8_t note = localMsg[2];
+                if (note < 12) {
+                    uint32_t step = stepSizes[note];
+                    // If there's room, add a new note.
+                    if (activeNoteCount < MAX_POLYPHONY) {
+                        activeNotes[activeNoteCount].stepSize = step;
+                        activeNotes[activeNoteCount].phaseAcc = 0;
+                        activeNotes[activeNoteCount].elapsed = 0; // reset elapsed time
+                        activeNoteCount++;
+                    }
+                    else {
+                        // Voice stealing: find the oldest note and replace it.
+                        uint8_t idxToSteal = 0;
+                        uint32_t maxElapsed = activeNotes[0].elapsed;
+                        for (uint8_t i = 1; i < activeNoteCount; i++) {
+                            if (activeNotes[i].elapsed > maxElapsed) {
+                                maxElapsed = activeNotes[i].elapsed;
+                                idxToSteal = i;
+                            }
+                        }
+                        activeNotes[idxToSteal].stepSize = step;
+                        activeNotes[idxToSteal].phaseAcc = 0;
+                        activeNotes[idxToSteal].elapsed = 0;
+                    }
+                }
+            }
+```
 
 ## 2.3 Transposition and Octave Control
 
@@ -110,6 +169,7 @@ $f_{final} = f_{base}$ * 2^((knob0_value + (joystick_offset * fineTuneFactor)) /
 
 This formula allows for seamless integration of transposition and octave adjustments, ensuring that pitch modifications remain musically accurate and responsive to user input.
 
+However, when the formula was initially implemented, the timing constraints were not met properly as the computation time to calculate exponents is signifcantly high. To solve this issue, the transposed frequencies were replaced with pre-computed values that can scale the frequency, also using the same formula above. These scaling values are stored in a lookup table, and depending on the amount of transposing required, the current frequency will be multiplied with the corresponding constant in the table. This would remove the extra computational time for exponential calculation, and after testing, satisfy the timing requirements of the system. 
 
 ## 3. Key Matrix Scanning
 
@@ -124,7 +184,12 @@ This formula allows for seamless integration of transposition and octave adjustm
 - **Combining multiple synthesizers:**
   Using the East and West Detection local input, the synthesizer can detected if a separate synthesizer is attached on its left or right.
   ```
-  insert code here
+  else if (localInputs[23]){
+            Serial.println("West Detect Initiated");
+        }
+        else if (localInputs[27]){
+            Serial.println("East Detect Initiated");
+        }
   ```
 
 ## Future Enhancements
