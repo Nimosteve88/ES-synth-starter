@@ -160,6 +160,8 @@ struct {
     Knob knob1;
     Knob knob0;
     uint8_t RX_Message[8];
+    bool eastDetected;
+    bool westDetected;
     } sysState;
 
 
@@ -497,6 +499,12 @@ void scanKeysTask(void * pvParameters) {
             moduleRole = (moduleRole == SENDER) ? RECEIVER : SENDER;
             xSemaphoreGive(sysState.mutex);
             Serial.println("Role changed");        
+        }
+        else if (localInputs[23]){
+            Serial.println("West Detect Initiated");
+        }
+        else if (localInputs[27]){
+            Serial.println("East Detect Initiated");
         }
         prevKnob1SPressed = knob1SPressed;
         prevKnob0SPressed = knob0SPressed;
