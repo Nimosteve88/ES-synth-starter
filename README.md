@@ -46,7 +46,7 @@ The ES-Synth Keyboard is a versatile synthesizer that supports multiple sound mo
 ## Additional Resources
 
 - **Lab Report:** [Report README](readmeFolder/Report.md)  
-- **Feature Details:** [Features README](readmeFolder/Features.md)
+- **Advanced Feature Details:** [Features README](readmeFolder/Features.md)
 
 
 ## Contributors
