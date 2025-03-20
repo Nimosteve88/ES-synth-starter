@@ -37,7 +37,7 @@ The following list presents all the control inputs implemented in the system.
 ## 2. Sound Generation
 
 ## 2.1 Waveform Modes
-Different waveforms are customized to produce different sound effects. These configurations can be selected by Knob 0. 
+A synthesizer's sound generation relies on various waveform modes, each offering unique tonal characteristics suited for different musical applications. Implemented using a phase accumulator and various functions, these waveforms are generated algorithmically to produce consistent and predictable oscillations. 
 
 - **Sawtooth:**  
   Uses a linear phase accumulator to generate a continuously increasing ramp that resets at its maximum value. The basic formula resembles:  
@@ -74,10 +74,12 @@ Different waveforms are customized to produce different sound effects. These con
   - **Envelope:** Instead of decaying, a rising envelope function (such as an exponential approach to a ceiling) is applied so that the note starts soft and grows to its full amplitude.  
     *Formula example:* `env = 1 - exp(-k * elapsedTime)` where `k` controls the speed of rise.
   - **Pitch Factor:** A secondary modulation factor adjusts the pitch over time, defined by a custom function (`getRisePitchFactor`) to create evolving tonal characteristics. This mode does not remove notes quickly since the envelope is expected to reach its peak value and sustain the tone.
+ 
+Additional techniques, such as envelope shaping, pitch modulation, and randomization, can allow more expressive and dynamic sounds, enabling the synthesizer to emulate acoustic instruments, create evolving textures, or generate percussive noise effects.
 
 ## 2.2 Polyphony Implementation
 
-In our implementation (main.cpp), polyphony is achieved by maintaining a pool of active voices that can overlap. When a key is pressed, the system allocates a voice from the available pool and assigns it the corresponding note parameters, including waveform type, frequency, and envelope settings. The code manages voice allocation dynamically, allowing for multiple simultaneous notes. When the note's envelope decays past a threshold or the key is released, the corresponding voice is deactivated and returned to the pool. Additionally, if the number of simultaneous note requests exceeds the available voices, a simple voice-stealing strategy is employed to ensure continuous sound generation without interruption.
+In our implementation (main.cpp), polyphony is achieved by maintaining a pool of active voices that can overlap, allowing multiple notes to be played simultaneously. Each active note is represented by a structure that tracks its step size (frequency), phase accumulator, and elapsed time. The system maintains a fixed-size array 'activeNotes[MAX_POLYPHONY]' to store these active voices, ensuring that no more than 'MAX_POLYPHONY' notes can sound at once.
 ```
 struct ActiveNote {
     uint32_t stepSize;
@@ -91,7 +93,14 @@ ActiveNote activeNotes[MAX_POLYPHONY];
 uint8_t activeNoteCount = 0;
 ```
 
-The function is implemented using the following logic:
+When a key is pressed, the system allocates a voice from the available pool and assigns it the corresponding note parameters, including waveform type, frequency, and envelope settings. If an available slot exists within the 'activeNotes' array, the new note is added, and its parameters are initialized. If all slots are occupied, a voice-stealing mechanism ensures continuous sound generation without interruption by replacing the oldest active voice with the new note, prioritizing recent inputs for a seamless user experience.
+
+Conversely, when a key is released, the system scans the active voices for the corresponding note and removes it by shifting the remaining notes in the array. Additionally, voices naturally deactivate once their envelope decays below a certain threshold, preventing excessive resource consumption.
+
+To maintain real-time performance, note events are processed using a message queue (msgInQ), where each message represents either a key press ('P') or release ('R'). The system listens for incoming events and updates the active voice list accordingly. 
+
+By implementing this efficient voice management system, the synthesizer delivers smooth, uninterrupted sound even when multiple keys are pressed or released rapidly, replicating the behavior of professional polyphonic instruments.
+
 ```
 if (xQueueReceive(msgInQ, localMsg, portMAX_DELAY) == pdPASS) {
             TASK_START();
@@ -140,10 +149,10 @@ if (xQueueReceive(msgInQ, localMsg, portMAX_DELAY) == pdPASS) {
 
 ## 2.3 Transposition and Octave Control
 
-Transposition and octave control are handled in main.cpp by combining adjustments from both the joystick and Knob 0 for fine and coarse transposition shifts, along with octave selection via Knob 2.
+Transposition and octave control in the synthesizer provide flexible pitch manipulation, allowing users to shift the pitch of notes dynamically. They are handled in main.cpp by combining adjustments from both the joystick and Knob 0 for fine and coarse transposition shifts, along with octave selection via Knob 2.
 
 ### Transposition (Knob 0 & Joystick)
-The base frequency of a note (f_base) is adjusted based on a transposition value, T, which is the sum of the coarse adjustment from Knob 0 and a fine, fractional adjustment derived from the joystick input. The transposed frequency is calculated using the formula:
+The base frequency of a note ($f_{base}$) is adjusted based on a transposition value, T, which is the sum of the coarse adjustment from Knob 0 and a fine, fractional adjustment derived from the joystick input. The transposed frequency is calculated using the formula:
    
 $f_{transposed} = f_{base}$ * 2^(T/12)
 
@@ -153,8 +162,10 @@ Where:
 - joystick_offset provides a fractional enhancement for smoother pitch modulation.
 - fineTuneFactor scales the joystick's contribution to semitone shifts.
 
+This dual adjustment system enables precise pitch modifications, from subtle vibrato effects to full key changes.
+
 ### Octave Control (Knob 2)
-Octave control scales the transposed frequency by a power-of-two factor, effectively doubling or halving the frequency for each octave change. This is given by:
+Once the transposition is applied, Knob 2 further modifies the pitch by shifting the frequency up or down in octaves. This is achieved by scaling the transposed frequency by a power-of-two factor:
 
 $f_{octave} = f_{transposed}$ * 2^(N - $N_{ref})$
 
@@ -193,12 +204,16 @@ However, when the formula was initially implemented, the timing constraints were
   ```
 
 ## Future Enhancements
+As the synthesizer project evolves, several future enhancements can be implemented to increase flexibility, improve usability, and expand creative possibilities. Below are some key areas for improvement and their potential impact on the system.
 
-- **Enhanced Debugging Functions:**  
-  Additional debug messages are already provided (e.g., for Knob 2S, Knob 3S, and Joystick S), making it easier to integrate advanced functionality in future revisions.
+- **Enhanced Debugging Functions:**
+  While the current system already provides debug messages for various controls (such as Knob 2S, Knob 3S, and the Joystick), future revisions could introduce real-time logging, graphical debugging interfaces, and diagnostic modes to further streamline development and troubleshooting. Possible enhancements include a serial console or UI-based tool that displays real-time values for frequency, amplitude, and envelope state, making it easier to identify potential issues.
 - **Extended Effects and Modulations:**  
-  Plans exist for expanding the function of the joystick and integrating more sophisticated modulation effects.
+  Currently, the joystick is used for fine-tuning pitch, but future versions could expand its functionality to introduce advanced modulation effects that enhance expressiveness. For instance, the joystick could control depth and rate of vibrato (pitch modulation) or tremolo (amplitude modulation), creating richer and more organic sounds. Furthermore, assigning joystick movement to a low-pass filter cutoff frequency would allow real-time tone shaping, similar to analog synthesizers.
 - **Adding dependent octaves with combined synthesizers:**  
-  When a multiple synthesizers is connected, an algorithm can be implemented to determine its octaves such that a synthesizer on the right would always be one octave higher than the one on its left. 
+  The idea is to create an adaptive octave assignment algorithm that automatically organizes pitch relationships between multiple connected synthesizers. Specifically, when a new synthesizer is connected, its default octave is adjusted based on its relative position in the setup. For example, the leftmost synthesizer plays in a lower octave, and each synthesizer to the right shifts one octave higher.
 
-This detailed breakdown not only highlights the core hardware interactions but also explains the signal processing and modulation techniques that contribute to the rich feature set of the ES-Synth Keyboard.
+  To implement this, each synthesizer could register itself by atomically incrementing a global counter, determining its relative position and assigned octave. A mutex-protected list can be added to track active synthesizers, ensuring that when one disconnects, the remaining ones adjust accordingly. Additionally, a queue will be needed to allow communication between syntehsizers and dynamically updating their octave settings in real time. However, it will require extensive testing and debugging to achieve this function. 
+
+## Conclusion
+Overall, this detailed breakdown not only highlights the core hardware interactions but also explains the signal processing and modulation techniques that contribute to the ES-Synth Keyboard. 
