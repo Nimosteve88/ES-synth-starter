@@ -11,7 +11,6 @@ This document details the advanced features implemented in the ES-Synth Keyboard
 - [2. Key Matrix Scanning](#2-key-matrix-scanning)
 - [3. Control Inputs](#3-control-inputs)
 - [4. Display and Communication](#4-display-and-communication)
-- [5. Real-Time Task Management](#5-real-time-task-management)
 - [Future Enhancements](#future-enhancements)
 
 ## 1. Control Inputs
@@ -120,23 +119,13 @@ This formula allows for seamless integration of transposition and octave adjustm
 - **Note Mapping:**  
   Each key (0–11) maps to a specific frequency by selecting a corresponding step size within the waveform generation algorithm.
 
-## 4. Display and Communication
+## 4. East and West Keyboard Detection
 
-- **OLED Display Feedback:**  
-  The system updates an OLED display to visually indicate system status, current waveform, and other useful information for the user.
-  
-- **Inter-Module Communication (CAN Bus):**  
-  Implements CAN bus communication allowing multiple modules to exchange data. The module role (SENDER/RECEIVER) affects how data is transmitted and received.
-
-## 5. Real-Time Task Management
-
-- **FreeRTOS-Based Tasks:**  
-  - **scanKeysTask:**  
-    This task scans keyboard inputs at regular intervals (every 20–50ms), handles debouncing, and updates state changes for controls.
-  - **sampleISR:**  
-    An interrupt service routine handles real-time audio sample generation. It adjusts envelopes, pitches, and combines notes efficiently.
-  - **displayUpdateTask:**  
-    Periodically updates the display and polls for CAN messages, ensuring that system feedback is current.
+- **Combining multiple synthesizers:**
+  Using the East and West Detection local input, the synthesizer can detected if a separate synthesizer is attached on its left or right.
+  ```
+  insert code here
+  ```
 
 ## Future Enhancements
 
@@ -144,5 +133,7 @@ This formula allows for seamless integration of transposition and octave adjustm
   Additional debug messages are already provided (e.g., for Knob 2S, Knob 3S, and Joystick S), making it easier to integrate advanced functionality in future revisions.
 - **Extended Effects and Modulations:**  
   Plans exist for expanding the function of the joystick and integrating more sophisticated modulation effects.
+- **Adding dependent octaves with combined synthesizers:**  
+  When a multiple synthesizers is connected, an algorithm can be implemented to determine its octaves such that a synthesizer on the right would always be one octave higher than the one on its left. 
 
 This detailed breakdown not only highlights the core hardware interactions but also explains the signal processing and modulation techniques that contribute to the rich feature set of the ES-Synth Keyboard.
