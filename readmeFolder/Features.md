@@ -86,7 +86,7 @@ Transposition and octave control are handled in main.cpp by combining adjustment
 ### Transposition (Knob 0 & Joystick)
 The base frequency of a note (f_base) is adjusted based on a transposition value, T, which is the sum of the coarse adjustment from Knob 0 and a fine, fractional adjustment derived from the joystick input. The transposed frequency is calculated using the formula:
    
-   f_transposed = f_base * 2^(T/12)
+$f_transposed = f_base * 2^(T/12)$
 
 Where:
 - T = knob0_value + (joystick_offset * fineTuneFactor)
@@ -97,7 +97,7 @@ Where:
 ### Octave Control (Knob 2)
 Octave control scales the transposed frequency by a power-of-two factor, effectively doubling or halving the frequency for each octave change. This is given by:
 
-   f_octave = f_transposed * 2^(N - N_ref)
+$f_octave = f_transposed * 2^(N - N_ref)$
 
 Where:
 - N is the octave selected via Knob 2.
@@ -106,7 +106,7 @@ Where:
 ### Final Frequency Calculation
 Combining both adjustments, the final frequency for a note is computed as:
 
-   f_final = f_base * 2^((knob0_value + (joystick_offset * fineTuneFactor)) / 12) * 2^(N - N_ref)
+$f_final = f_base * 2^((knob0_value + (joystick_offset * fineTuneFactor)) / 12) * 2^(N - N_ref)$
 
 This formula allows for seamless integration of transposition and octave adjustments, ensuring that pitch modifications remain musically accurate and responsive to user input.
 
